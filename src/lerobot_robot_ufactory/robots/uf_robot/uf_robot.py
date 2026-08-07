@@ -344,7 +344,7 @@ class UFRobot(Robot, Thread):
                 camera_width = self.camera_width if self.camera_width != 0 else shape[1]
                 camera_height = self.camera_height if self.camera_height != 0 else shape[0]
                 import cv2
-                frame = cv2.resize(frame, (camera_height, camera_width), interpolation=cv2.INTER_AREA)
+                frame = cv2.resize(frame, (camera_width, camera_height), interpolation=cv2.INTER_AREA)
             obs_dict[f"{self.prefix}{cam_key}"] = frame
             self.logs[f"async_read_camera_{cam_key}_dt_s"] = time.perf_counter() - before_camread_t
 

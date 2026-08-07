@@ -88,3 +88,9 @@ models/
 *.trt
 *.xvcd
 ufactory_usage/
+src/lerobot_robot_ufactory/scripts/uf_download_resources.py
+config/mock/
+docs
+xvsdk
+completion.sh
+view.sh

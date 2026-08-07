@@ -10,7 +10,14 @@ import numpy as np
 import lerobot_robot_ufactory # patch
 from lerobot.scripts.lerobot_record import register_third_party_plugins
 from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
-from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
+from lerobot.__version__ import __version__
+from lerobot_robot_ufactory.utils.utils import version_ge
+if version_ge(__version__, '0.5.1'):
+    from lerobot.datasets.feature_utils import build_dataset_frame, combine_feature_dicts
+    from lerobot.utils.device_utils import get_safe_torch_device
+else:
+    from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
+    from lerobot.utils.utils import get_safe_torch_device
 from lerobot.policies.utils import make_robot_action
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
@@ -29,17 +36,23 @@ from lerobot.utils.control_utils import (
 )
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
-from lerobot.utils.utils import (
-    get_safe_torch_device,
-    init_logging,
-)
+from lerobot.utils.utils import init_logging
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.scripts.lerobot_record import DatasetRecordConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
 from lerobot_robot_ufactory.devices.umi.vive_tracker.transformations import Transformations
+from lerobot_robot_ufactory.configs.parser import wrap as _uf_config_parser_wrap
+parser.wrap = _uf_config_parser_wrap
 
+POSE_KEYS = ('pose.x', 'pose.y', 'pose.z', 'pose.rx', 'pose.ry', 'pose.rz')
+
+def _as_pose_array(pose) -> np.ndarray:
+    arr = np.asarray(pose, dtype=np.float64).reshape(-1)
+    if arr.size < 6:
+        raise ValueError(f"Expected at least 6 pose values, got shape {arr.shape}")
+    return arr
 
 def continuous_rotvec(new_rv, prev_rv):
     """Keep rotvec in the same sign-hemisphere as prev to avoid ±π flips.
@@ -91,6 +104,35 @@ def compute_target_axis_angle(rot_prev, rot_delta):
     # R_curr = R_prev.apply(R_delta)
     return Transformations.rotation_matrix_to_rxryrz(R_curr)
 
+def to_relative_pose(prev, curr):
+    prev = _as_pose_array(prev)
+    curr = _as_pose_array(curr)
+    R_prev = Transformations.rxryrz_to_rotation_matrix(*prev[3:6])
+    R_curr = Transformations.rxryrz_to_rotation_matrix(*curr[3:6])
+
+    # 纯 numpy: R.inv() = R.T, inv * v = R.T @ v, inv * R2 = R.T @ R2
+    rel_pos = R_prev.T @ (curr[:3] - prev[:3])
+    rel_rot = Transformations.rotation_matrix_to_rxryrz(R_prev.T @ R_curr)
+    return np.concatenate([rel_pos, rel_rot]).astype(np.float64)
+
+def to_absolute_pose(delta, prev):
+    delta = _as_pose_array(delta)
+    prev = _as_pose_array(prev)
+    R_delta = Transformations.rxryrz_to_rotation_matrix(*delta[3:6])
+    R_prev = Transformations.rxryrz_to_rotation_matrix(*prev[3:6])
+
+    # 纯 numpy: apply(v) = R @ v, R1 * R2 = R1 @ R2
+    abs_pos = prev[:3] + R_prev @ delta[:3]
+    abs_rot = Transformations.rotation_matrix_to_rxryrz(R_prev @ R_delta)
+    abs_rot = continuous_rotvec(abs_rot, prev[3:6])
+    return np.concatenate([abs_pos, abs_rot]).astype(np.float64)
+
+def get_pose_from_feature_dict(feature_dict, prefix=''):
+    return np.array([feature_dict[f'{prefix}{key}'] for key in POSE_KEYS])
+
+def update_feature_dict_from_pose(feature_dict, pose, prefix=''):
+    for i, key in enumerate(POSE_KEYS):
+        feature_dict[f'{prefix}{key}'] = pose[i]
 
 @dataclass
 class EvalConfig:
@@ -120,8 +162,10 @@ class EvalConfig:
         return ["policy"]
 
 
-def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
+def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False, camera_width=0, camera_height=0):
     init_logging()
+    if camera_width or camera_height:
+        cfg.robot.cameras_args = {'w': camera_width, 'h': camera_height}
     logging.info(pformat(asdict(cfg)))
 
     robot = make_robot_from_config(cfg.robot)
@@ -242,22 +286,22 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
         prev_robot_dict = {}
         prev_action_dict = {}
 
-        is_multiple_robot = False
         if hasattr(cfg.robot, 'robots'):
             keys = cfg.robot.robots.keys()
-            is_multiple_robot = True
         else:
             keys = ['']
         for key in keys:
-            prefix = f'.{key}' if key else ''
-            is_tcp = f'{prefix}pose.x' in obs and f'{prefix}pose.y' in obs and f'{prefix}pose.z' in obs and f'{prefix}pose.rx' in obs and f'{prefix}pose.ry' in obs and f'{prefix}pose.rz' in obs
+            prefix = f'{key}.' if key else ''
+            is_tcp = all([f'{prefix}{item}' in obs for item in POSE_KEYS])
             if is_tcp:
-                pose = [obs[f'{prefix}pose.x'], obs[f'{prefix}pose.y'], obs[f'{prefix}pose.z'], obs[f'{prefix}pose.rx'], obs[f'{prefix}pose.ry'], obs[f'{prefix}pose.rz']]
+                pose = get_pose_from_feature_dict(obs, prefix=prefix)
             else:
                 pose = []
             prev_robot_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
             prev_action_dict[key] = {'type': 1 if is_tcp else 0, 'pose': np.array(pose)}
 
+        is_first = True
+        
         while True:
             start_loop_t = time.perf_counter()
 
@@ -272,34 +316,37 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
             curr_robot_dict = {}
             curr_action_dict = {}
             for key in keys:
-                prefix = f'.{key}' if key else ''
-                is_tcp = f'{prefix}pose.x' in obs and f'{prefix}pose.y' in obs and f'{prefix}pose.z' in obs and f'{prefix}pose.rx' in obs and f'{prefix}pose.ry' in obs and f'{prefix}pose.rz' in obs
-                if not is_tcp or prev_robot_dict[key]['type'] != 1:
+                prefix = f'{key}.' if key else ''
+                is_tcp = all([f'{prefix}{key}' in obs for key in POSE_KEYS])
+
+                if not is_tcp:
                     curr_robot_dict[key] = {'type': 0, 'pose': []}
                     continue
                 if rx_continuous and not relative and f'{prefix}pose.rx' in obs and obs[f'{prefix}pose.rx'] < 0:
                     obs[f'{prefix}pose.rx'] += 2 * np.pi
-                prev_robot_pose = prev_robot_dict[key]['pose']
-                curr_robot_pose = np.array([obs[f'{prefix}pose.x'], obs[f'{prefix}pose.y'], obs[f'{prefix}pose.z'], obs[f'{prefix}pose.rx'], obs[f'{prefix}pose.ry'], obs[f'{prefix}pose.rz']])
-                curr_rot_normalized = continuous_rotvec(curr_robot_pose[3:6], prev_robot_pose[3:6])
-                curr_robot_pose[3] = float(curr_rot_normalized[0])
-                curr_robot_pose[4] = float(curr_rot_normalized[1])
-                curr_robot_pose[5] = float(curr_rot_normalized[2])
+                curr_robot_pose = get_pose_from_feature_dict(obs, prefix=prefix)
+                if not is_first:
+                    prev_robot_pose = prev_robot_dict[key]['pose']
+                    # curr_robot_pose[3:6] = continuous_rotvec(curr_robot_pose[3:6], prev_robot_pose[3:6])
                 curr_robot_dict[key] = {'type': 1, 'pose': curr_robot_pose}
 
                 if relative:
-                    delta = compute_relative_axis_angle(prev_robot_pose[3:6], curr_robot_pose[3:6])
-                    obs[f'{prefix}pose.x'] = curr_robot_pose[0] - prev_robot_pose[0]
-                    obs[f'{prefix}pose.y'] = curr_robot_pose[1] - prev_robot_pose[1]
-                    obs[f'{prefix}pose.z'] = curr_robot_pose[2] - prev_robot_pose[2]
-                    obs[f'{prefix}pose.rx'] = delta[0]
-                    obs[f'{prefix}pose.ry'] = delta[1]
-                    obs[f'{prefix}pose.rz'] = delta[2]
-                    prev_robot_dict[key]['pose'] = curr_robot_pose                 
+                    if is_first:
+                        delta = np.zeros(6, dtype=np.float64)
+                    else:
+                        delta = to_relative_pose(prev_robot_pose, curr_robot_pose)
+                    update_feature_dict_from_pose(obs, delta, prefix=prefix)
+                    # delta = compute_relative_axis_angle(prev_robot_pose[3:6], curr_robot_pose[3:6])
+                    # obs[f'{prefix}pose.x'] = curr_robot_pose[0] - prev_robot_pose[0]
+                    # obs[f'{prefix}pose.y'] = curr_robot_pose[1] - prev_robot_pose[1]
+                    # obs[f'{prefix}pose.z'] = curr_robot_pose[2] - prev_robot_pose[2]
+                    # obs[f'{prefix}pose.rx'] = delta[0]
+                    # obs[f'{prefix}pose.ry'] = delta[1]
+                    # obs[f'{prefix}pose.rz'] = delta[2]
+                    prev_robot_dict[key] = {'type': 1, 'pose': curr_robot_pose}
 
             # Applies a pipeline to the raw robot observation, default is IdentityProcessor
             obs_processed = robot_observation_processor(obs)
-
             observation_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
 
             action_values = predict_action(
@@ -316,19 +363,27 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
             robot_action_to_send = robot_action_processor((act_processed_policy, obs))
 
             for key in keys:
-                prefix = f'.{key}' if key else ''
-                if not curr_robot_dict[key]['type'] != 1 or prev_action_dict[key]['type'] != 1:
+                prefix = f'{key}.' if key else ''
+                if curr_robot_dict[key]['type'] != 1:
                     continue
                 if relative:
-                    rot_delta = np.array([robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']])
-                    prev_action_pose = prev_action_dict[key]['pose']
-                    rot_curr = compute_target_axis_angle(prev_action_pose[3:6], rot_delta)
-                    robot_action_to_send[f'{prefix}pose.x'] = prev_action_pose[0] + robot_action_to_send[f'{prefix}pose.x']
-                    robot_action_to_send[f'{prefix}pose.y'] = prev_action_pose[1] + robot_action_to_send[f'{prefix}pose.y']
-                    robot_action_to_send[f'{prefix}pose.z'] = prev_action_pose[2] + robot_action_to_send[f'{prefix}pose.z']
-                    robot_action_to_send[f'{prefix}pose.rx'] = rot_curr[0]
-                    robot_action_to_send[f'{prefix}pose.ry'] = rot_curr[1]
-                    robot_action_to_send[f'{prefix}pose.rz'] = rot_curr[2]
+                    delta = get_pose_from_feature_dict(robot_action_to_send, prefix=prefix)
+                    curr_robot_pose = curr_robot_dict[key]['pose']
+                    target_action_pose = to_absolute_pose(delta, curr_robot_pose)
+                    if not is_first:
+                        prev_action_pose = prev_action_dict[key]['pose']
+                        target_action_pose[3:6] = continuous_rotvec(target_action_pose[3:6], prev_action_pose[3:6])
+                    update_feature_dict_from_pose(robot_action_to_send, target_action_pose, prefix=prefix)
+                    
+                    # prev_action_pose = prev_action_dict[key]['pose']
+                    # rot_delta = np.array([robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']])
+                    # rot_curr = compute_target_axis_angle(prev_action_pose[3:6], rot_delta)
+                    # robot_action_to_send[f'{prefix}pose.x'] = prev_action_pose[0] + robot_action_to_send[f'{prefix}pose.x']
+                    # robot_action_to_send[f'{prefix}pose.y'] = prev_action_pose[1] + robot_action_to_send[f'{prefix}pose.y']
+                    # robot_action_to_send[f'{prefix}pose.z'] = prev_action_pose[2] + robot_action_to_send[f'{prefix}pose.z']
+                    # robot_action_to_send[f'{prefix}pose.rx'] = rot_curr[0]
+                    # robot_action_to_send[f'{prefix}pose.ry'] = rot_curr[1]
+                    # robot_action_to_send[f'{prefix}pose.rz'] = rot_curr[2]
                 elif rx_continuous and f'{prefix}pose.rx' in robot_action_to_send and robot_action_to_send[f'{prefix}pose.rx'] > math.pi:
                     robot_action_to_send[f'{prefix}pose.rx'] -= 2 * np.pi
 
@@ -337,8 +392,8 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
                 # Rate-limited smoothing: cap position velocity to reduce chunk boundary jerks
                 # Uses vector-norm clamping to preserve motion direction
                 if SMOOTH_THRESHOLD > 0:
-                    pos_keys = [f'{prefix}pose.x', f'{prefix}pose.y', f'{prefix}pose.z']
-                    rot_keys = [f'{prefix}pose.rx', f'{prefix}pose.ry', f'{prefix}pose.rz']
+                    pos_keys = [f'{prefix}{key}' for key in POSE_KEYS[:3]]
+                    rot_keys = [f'{prefix}{key}' for key in POSE_KEYS[3:6]]
                     if prev_smoothed_pose is None:
                         prev_smoothed_pose = {k: robot_action_to_send[k] for k in pos_keys + rot_keys}
                     else:
@@ -359,10 +414,7 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
                             robot_action_to_send[k] = prev_smoothed_pose[k]
 
                 if relative:
-                    curr_action_pose = np.array([
-                        robot_action_to_send[f'{prefix}pose.x'], robot_action_to_send[f'{prefix}pose.y'], robot_action_to_send[f'{prefix}pose.z'],
-                        robot_action_to_send[f'{prefix}pose.rx'], robot_action_to_send[f'{prefix}pose.ry'], robot_action_to_send[f'{prefix}pose.rz']
-                    ])
+                    curr_action_pose = get_pose_from_feature_dict(robot_action_to_send, prefix=prefix)
                     # 相对增量模式: 漂移修正，将指令位姿温和拉回实际位姿
                     # prev_action_pose = blend_poses(curr_action_pose, curr_robot_pose, 0.05)
                     prev_action_dict[key]['pose'] = curr_action_pose
@@ -395,6 +447,7 @@ def eval_loop(cfg: EvalConfig, relative=False, rx_continuous=False):
             #     gripper_raw = (future_gripper_norm + 1) / 2 * (_gripper_max - _gripper_min) + _gripper_min
             # robot_action_to_send['right.gripper.pos'] = 1.0 if gripper_raw > 0.4 else 0.0
 
+            is_first = False
             robot.send_action(robot_action_to_send)
         
             dt_s = time.perf_counter() - start_loop_t
@@ -415,11 +468,13 @@ def main():
     parser = argparse.ArgumentParser(description='configuration args')
     parser.add_argument('--relative', action='store_true', help='is relative motion or not')
     parser.add_argument('--rx_continuous', action='store_true', help='rx continuous or not')
+    parser.add_argument('--camera_width', type=int, required=False, default=0)
+    parser.add_argument('--camera_height', type=int, required=False, default=0)
     args, unknown = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
     register_third_party_plugins()
     cfg = get_cfg()
-    eval_loop(cfg, args.relative, args.rx_continuous)
+    eval_loop(cfg, args.relative, args.rx_continuous, camera_width=args.camera_width, camera_height=args.camera_height)
 
 
 if __name__ == "__main__":

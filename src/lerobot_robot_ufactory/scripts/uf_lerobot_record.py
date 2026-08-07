@@ -1,12 +1,15 @@
 import sys
+import gc
 import copy
 import time
 import queue
+import pickle
 import argparse
 import logging
 import shutil
 import threading
 from pathlib import Path
+import torch
 import lerobot_robot_ufactory # patch
 from lerobot.scripts.lerobot_record import *
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
@@ -112,28 +115,139 @@ def _create_next_episode_buffer(dataset, current_episode_buffer):
     return _create_empty_episode_buffer(dataset, current_episode_index + 1, current_episode_buffer)
 
 
+def _release_unused_memory():
+    gc.collect()
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
+class ImageWriterSaveBarrier:
+    def __init__(self, image_writer, max_pending_image_tasks=8192):
+        self.image_writer = image_writer
+        self._max_pending_image_tasks = max(0, int(max_pending_image_tasks))
+        self._condition = threading.Condition()
+        self._submitted = 0
+        self._completed = 0
+        self._reported_backpressure = False
+        self._original_task_done = None
+
+    @classmethod
+    def install(cls, dataset, max_pending_image_tasks=8192):
+        image_writer = getattr(dataset, "image_writer", None)
+        if image_writer is None:
+            return None
+
+        existing = getattr(image_writer, "_uf_save_barrier", None)
+        if existing is not None:
+            return existing
+
+        barrier = cls(image_writer, max_pending_image_tasks)
+        if barrier._install():
+            image_writer._uf_save_barrier = barrier
+            return barrier
+        return None
+
+    def _install(self):
+        if getattr(self.image_writer, "num_processes", 0) != 0:
+            return False
+
+        task_queue = getattr(self.image_writer, "queue", None)
+        if task_queue is None:
+            return False
+
+        self._original_task_done = task_queue.task_done
+
+        def save_image(image, fpath, compress_level=1):
+            if isinstance(image, torch.Tensor):
+                image = image.cpu().numpy()
+            with self._condition:
+                while (
+                    self._max_pending_image_tasks > 0
+                    and self._submitted - self._completed >= self._max_pending_image_tasks
+                ):
+                    if not self._reported_backpressure:
+                        log_say(
+                            f"[Async] waiting for image writer backlog "
+                            f"({self._max_pending_image_tasks}) to release memory...",
+                            False
+                        )
+                        self._reported_backpressure = True
+                    self._condition.wait()
+                self._submitted += 1
+            task_queue.put((image, fpath, compress_level))
+
+        def task_done():
+            self._original_task_done()
+            with self._condition:
+                self._completed += 1
+                self._condition.notify_all()
+
+        self.image_writer.save_image = save_image
+        task_queue.task_done = task_done
+        return True
+
+    def snapshot(self):
+        with self._condition:
+            return self._submitted
+
+    def wait_until_done(self, snapshot):
+        with self._condition:
+            while self._completed < snapshot:
+                self._condition.wait()
+
+
 class AsyncEpisodeSaver:
     _STOP = object()
 
-    def __init__(self, dataset):
+    def __init__(self, dataset, max_pending_saves=5, max_pending_image_tasks=8192):
         self.dataset = dataset
         self._queue = queue.Queue()
+        self._max_pending_saves = max(1, int(max_pending_saves))
+        self._max_pending_image_tasks = max(0, int(max_pending_image_tasks))
+        self._pending_save_slots = threading.BoundedSemaphore(self._max_pending_saves)
+        self._spool_dir = Path(dataset.root) / ".uf_async_episode_spool"
+        self._spool_dir.mkdir(parents=True, exist_ok=True)
         self._total_cnts = 0
         self._finish_cnts = 0
         self._exception = None
+        self._wait_context = threading.local()
+        self._image_writer_barrier = ImageWriterSaveBarrier.install(dataset, self._max_pending_image_tasks)
+        self._original_wait_image_writer = getattr(dataset, "_wait_image_writer", None)
+        if self._image_writer_barrier is not None and self._original_wait_image_writer is not None:
+            self._patch_dataset_image_writer_wait()
+        elif getattr(dataset, "image_writer", None) is not None:
+            log_say("[Async] image writer barrier is unavailable; async saves may wait for active recording.", False)
         self._thread = threading.Thread(target=self._run, name="uf-async-episode-saver", daemon=True)
         self._thread.start()
 
     def submit_current_episode(self):
         self._raise_if_failed()
-        episode_buffer = _get_episode_buffer(self.dataset)
-        if _episode_buffer_size(episode_buffer) == 0:
-            raise RuntimeError("Cannot async save an empty episode buffer.")
+        if not self._pending_save_slots.acquire(blocking=False):
+            log_say(f"[Async] waiting for pending saves ({self._max_pending_saves}) to release memory...", False)
+            self._pending_save_slots.acquire()
 
-        episode_index = _episode_buffer_index(episode_buffer)
-        next_episode_buffer = _create_next_episode_buffer(self.dataset, episode_buffer)
-        _set_episode_buffer(self.dataset, next_episode_buffer)
-        self._queue.put((episode_index, episode_buffer))
+        try:
+            self._raise_if_failed()
+            episode_buffer = _get_episode_buffer(self.dataset)
+            if _episode_buffer_size(episode_buffer) == 0:
+                raise RuntimeError("Cannot async save an empty episode buffer.")
+
+            episode_index = _episode_buffer_index(episode_buffer)
+            next_episode_buffer = _create_next_episode_buffer(self.dataset, episode_buffer)
+            _set_episode_buffer(self.dataset, next_episode_buffer)
+            image_writer_snapshot = self._image_writer_snapshot()
+            spool_path = self._write_episode_spool(episode_index, episode_buffer)
+            self._queue.put((episode_index, episode_buffer, image_writer_snapshot, spool_path))
+            log_say(f"[Async] episode {episode_index} submitted for async save, all_pending={self._queue.qsize()}", False)
+        except BaseException:
+            self._pending_save_slots.release()
+            raise
         return episode_index
 
     def wait_idle(self):
@@ -141,21 +255,28 @@ class AsyncEpisodeSaver:
         self._raise_if_failed()
 
     def close(self):
-        self._queue.join()
-        self._queue.put(self._STOP)
-        self._queue.join()
-        self._thread.join()
-        self._raise_if_failed()
+        try:
+            self._queue.join()
+            self._queue.put(self._STOP)
+            self._queue.join()
+            self._thread.join()
+            self._raise_if_failed()
+        finally:
+            self._restore_dataset_image_writer_wait()
 
     def _run(self):
         while True:
             item = self._queue.get()
+            release_pending_slot = False
+            episode_buffer = None
             try:
                 if item is self._STOP:
                     return
-                episode_index, episode_buffer = item
-                print(f'[Async] saving episode {episode_index}')
+                release_pending_slot = True
+                episode_index, episode_buffer, image_writer_snapshot, spool_path = item
+                log_say(f"[Episode {episode_index}] async saving ...", False)
                 try:
+                    self._wait_context.image_writer_snapshot = image_writer_snapshot
                     self.dataset.save_episode(episode_data=episode_buffer)
                 except TypeError as exc:
                     if "episode_data" in str(exc):
@@ -164,12 +285,57 @@ class AsyncEpisodeSaver:
                         ) from exc
                     raise
                 self._delete_saved_image_dirs(episode_index)
-                print(f'[Async] save episode {episode_index} finish')
+                self._delete_episode_spool(spool_path)
+                log_say(f"[Episode {episode_index}] async save finish, all_pending={self._queue.qsize()}", False)
             except BaseException as exc:
                 self._exception = exc
-                print(f'[Async] episode {episode_index} save failed, {exc}')
+                log_say(f"[Episode {episode_index}] async save failed, {exc}", False)
             finally:
+                if hasattr(self._wait_context, "image_writer_snapshot"):
+                    del self._wait_context.image_writer_snapshot
+                if isinstance(episode_buffer, dict):
+                    episode_buffer.clear()
+                item = None
+                episode_buffer = None
+                _release_unused_memory()
+                if release_pending_slot:
+                    self._pending_save_slots.release()
                 self._queue.task_done()
+
+    def _write_episode_spool(self, episode_index, episode_buffer):
+        spool_path = self._spool_dir / f"episode-{episode_index:06d}.pkl"
+        tmp_path = spool_path.with_suffix(".pkl.tmp")
+        with tmp_path.open("wb") as f:
+            pickle.dump(
+                {"episode_index": episode_index, "episode_buffer": episode_buffer},
+                f,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        tmp_path.replace(spool_path)
+        return spool_path
+
+    def _delete_episode_spool(self, spool_path):
+        if spool_path is not None:
+            Path(spool_path).unlink(missing_ok=True)
+
+    def _patch_dataset_image_writer_wait(self):
+        def wait_image_writer_for_current_context():
+            image_writer_snapshot = getattr(self._wait_context, "image_writer_snapshot", None)
+            if image_writer_snapshot is not None:
+                self._image_writer_barrier.wait_until_done(image_writer_snapshot)
+            else:
+                self._original_wait_image_writer()
+
+        self.dataset._wait_image_writer = wait_image_writer_for_current_context
+
+    def _restore_dataset_image_writer_wait(self):
+        if self._original_wait_image_writer is not None:
+            self.dataset._wait_image_writer = self._original_wait_image_writer
+
+    def _image_writer_snapshot(self):
+        if self._image_writer_barrier is None:
+            return None
+        return self._image_writer_barrier.snapshot()
 
     def _delete_saved_image_dirs(self, episode_index):
         writer = _get_dataset_writer(self.dataset)
@@ -344,7 +510,12 @@ def record_loop(
         timestamp = time.perf_counter() - start_episode_t
 
 
-def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
+def record(
+    cfg: RecordConfig,
+    async_save: bool = False,
+    async_save_max_pending: int = 5,
+    async_save_max_image_tasks: int = 8192,
+) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
@@ -453,7 +624,7 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
             try:
                 if key == keyboard.Key.enter:
                     if not is_recorded:
-                        print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
+                        print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
                     else:
                         print('⌨   [ESC] Exit  [←] Reset  [→] Save')
                     # is_recorded = True
@@ -464,7 +635,7 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
 
         listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
         print("\n********** Episode Record Loop Start **********")
-        print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
+        print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
     else:
         input('⌨   Press Enter to start record >>> ')
         if is_uf_teleop:
@@ -473,7 +644,11 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
         print('\n********** Episode Record Loop Start **********')
 
     frame_callback = None
-    async_episode_saver = AsyncEpisodeSaver(dataset) if async_save else None
+    async_episode_saver = (
+        AsyncEpisodeSaver(dataset, async_save_max_pending, async_save_max_image_tasks)
+        if async_save
+        else None
+    )
     if async_episode_saver is not None:
         print('Async episode saving is enabled.')
 
@@ -543,7 +718,7 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
                         _set_episode_buffer(dataset, empty_episode_buffer)
                 is_recorded = False
                 if is_evt:
-                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
+                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
                 else:
                     input('\n⌨   Press Enter to rerecord this episode >>>>> ')
                     is_recorded = True
@@ -551,27 +726,27 @@ def record(cfg: RecordConfig, async_save: bool = False) -> LeRobotDataset:
 
             if is_recorded and not events['stop_recording']:
                 episode_index = _current_episode_index(dataset)
-                log_say(f"Save episode {episode_index}", cfg.play_sounds)
                 if is_uf_teleop:
                     teleop.set_teleop_enabled(False)
                 if async_episode_saver is None:
+                    log_say(f"[Episode {episode_index}] saving ...", cfg.play_sounds)
                     dataset.save_episode()
-                    log_say(f"[Finish] Save episode {episode_index}", cfg.play_sounds)
+                    log_say(f"[Episode {episode_index}] save finish", cfg.play_sounds)
                 else:
                     queued_episode_index = async_episode_saver.submit_current_episode()
                     if queued_episode_index is not None:
-                        log_say(f"[Queued] Save episode {queued_episode_index}", cfg.play_sounds)
+                        log_say(f"[Episode {queued_episode_index}] pushed to save queue", cfg.play_sounds)
 
                 recorded_episodes += 1
                 is_recorded = False
                 if is_evt:
-                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset  [→] Save')
+                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
                 else:
                     input('⌨   Press Enter to record at the next episode >>>>> ')
                     is_recorded = True
 
         if async_episode_saver is not None:
-            print('Waiting for pending async episode saves.')
+            log_say('Waiting for pending async episode saves, all_pending={}'.format(async_episode_saver._queue.qsize()), cfg.play_sounds)
             async_episode_saver.close()
 
     print("\n********** Episode Record Loop Exit **********")
@@ -599,10 +774,18 @@ def main():
                        action='store_true', # specify --resume if resume needs to be True
                        default=False,
                        help='Whether contitue recording on existing dataset (default: False)')
-    parser.add_argument('-a', '--async_save',
+    parser.add_argument('-a', '--async-save',
                        action='store_true',
                        default=False,
                        help='Enable async background saving (default: False)')
+    parser.add_argument('--async-save-max-pending',
+                       type=int,
+                       default=5,
+                       help='Maximum unfinished async episode saves kept in memory (default: 5)')
+    parser.add_argument('--async-save-max-image-tasks',
+                       type=int,
+                       default=8192,
+                       help='Maximum unfinished image write tasks kept in memory; 0 disables this limit (default: 8192)')
     args, unknown = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
     register_third_party_plugins()
@@ -610,7 +793,12 @@ def main():
     if args.r:
         cfg.resume = True
     cfg.play_sounds = False
-    record(cfg, async_save=args.async_save)
+    record(
+        cfg,
+        async_save=args.async_save,
+        async_save_max_pending=args.async_save_max_pending,
+        async_save_max_image_tasks=args.async_save_max_image_tasks,
+    )
 
 
 if __name__ == "__main__":

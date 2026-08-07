@@ -17,6 +17,11 @@ robot:
       start_tcp_pose: [400, 0, 150, -90, 0, 0]
       cameras:
         fisheye:
+          # type: uf::umi_camera
+          # serial_number: "250801DR48FB26001379"
+          # width: 1280
+          # height: 1280
+          # fps: 60
           type: opencv
           index_or_path: "/dev/v4l/by-id/usb-XVisio_Technology_XVisio_vSLAM_250801DR48FB26001379-video-index0"
           width: 1280
@@ -35,6 +40,11 @@ robot:
       start_tcp_pose: [400, 0, 150, 90, 0, 0]
       cameras:
         fisheye:
+          # type: uf::umi_camera
+          # serial_number: "250801DR48FB26001396"
+          # width: 1280
+          # height: 1280
+          # fps: 60
           type: opencv
           index_or_path: "/dev/v4l/by-id/usb-XVisio_Technology_XVisio_vSLAM_250801DR48FB26001396-video-index0"
           width: 1280
