@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-from lerobot.processor.core import RobotAction, RobotObservation
-from lerobot.processor.core import RobotObservation
+from lerobot.processor import RobotAction, RobotObservation
 from lerobot.robots import Robot
 from .multiple_uf_mock_robot_config import MultipleUFMockRobotConfig
 from .uf_mock_robot import UFMockRobot

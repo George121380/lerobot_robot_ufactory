@@ -287,6 +287,8 @@ class MultiCameraViewer:
             stop_event.set()
             if has_gui:
                 cv2.destroyAllWindows()
+                if kb_listener is not None:
+                    kb_listener.stop()
             for cam in self.cameras:
                 cam.close()
             print("\nExited.")

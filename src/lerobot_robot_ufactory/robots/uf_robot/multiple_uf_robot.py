@@ -9,6 +9,7 @@ from .uf_robot import UFRobot
 
 
 class MultipleUFRobot(Robot):
+    _action_stop_sentinel = object()
 
     config_class = MultipleUFRobotConfig
     name = "UFACTORY Multiple Robot"
@@ -40,7 +41,7 @@ class MultipleUFRobot(Robot):
         while robot.is_connected:
             try:
                 action = action_queue.get(timeout=0.5)
-                if action is None:
+                if action is self._action_stop_sentinel:
                     break
                 robot.send_action(action)
             except queue.Empty:
@@ -102,6 +103,11 @@ class MultipleUFRobot(Robot):
                 robot.configure()
 
     def disconnect(self) -> None:
+        if self._is_async_action:
+            for key in self.robots:
+                self.action_queues[key].put(self._action_stop_sentinel)
+            for thread in self.action_threads.values():
+                thread.join(timeout=2.0)
         for robot in self.robots.values():
             robot.disconnect()
 

@@ -56,14 +56,14 @@ git clone https://github.com/xArm-Developer/lerobot_robot_ufactory.git
 cd lerobot_robot_ufactory
 
 # 创建 conda 环境
-conda create -n uf_lerobot python=3.10 -y
+conda create -n uf_lerobot python=3.12 -y
 conda activate uf_lerobot
 
 # 安装项目
 pip install -e .
 ```
 
-包含：`lerobot==0.4.3`、`xarm-python-sdk`、`numpy`、`pyyaml`（lerobot 已自动携带 torch、opencv、wandb 等训练相关依赖）。
+包含：`lerobot==0.6.1`、`xarm-python-sdk`、`numpy`、`pyyaml`（lerobot 已自动携带 torch、opencv、wandb 等训练相关依赖）。
 
 ### 外设模块安装
 
@@ -90,10 +90,16 @@ sudo usermod -aG dialout $USER
 * 采集和推理时基站位置可不相同。
 
 ```bash
-# 1. 安装外设依赖（不需要它们的间接依赖）
-pip install pysurvive agx-pypika --no-deps
+# 1. libsurvive
+git clone https://github.com/cntools/libsurvive.git
+cd libsurvive
+pip install scikit-build
+python setup.py install
 
-# 2. 安装 udev 规则（重新插拔设备后生效）
+# 2. 安装外设依赖（不需要它们的间接依赖）
+pip install agx-pypika --no-deps
+
+# 3. 安装 udev 规则（重新插拔设备后生效）
 sudo cp rules/*.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
@@ -110,7 +116,11 @@ curl -sL https://raw.githubusercontent.com/xArm-Developer/ufactory_resources/mai
 sudo apt install -y --fix-broken
 
 # 2. 安装外设依赖
-pip install pysurvive --no-deps
+# 1. libsurvive
+git clone https://github.com/cntools/libsurvive.git
+cd libsurvive
+pip install scikit-build
+python setup.py install
 
 # 3. 安装 udev 规则（重新插拔设备后生效）
 sudo cp rules/*.rules /etc/udev/rules.d/

@@ -135,7 +135,12 @@ class GelloTeleop(UFBaseTeleop):
 
     def disconnect(self) -> None:
         if not self._is_connected:
-            DeviceNotConnectedError(f"{self} is not connected.")
+            raise DeviceNotConnectedError(f"{self} is not connected.")
 
         self._is_connected = False
+        if hasattr(self, "gello_agent") and self.gello_agent is not None:
+            try:
+                self.gello_agent.close()
+            except Exception:
+                logger.warning("Failed to close GelloAgent", exc_info=True)
         logger.info(f"{self} disconnected.")

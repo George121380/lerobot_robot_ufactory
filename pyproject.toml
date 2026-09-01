@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lerobot_robot_ufactory"
-version = "0.1.0"
+version = "0.2.0"
 description = "UFACTORY 机械臂与 LeRobot 框架集成"
 readme = "README.md"
 license = { text = "Apache-2.0" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
     { name = "lerobot_robot_ufactory Contributors" },
 ]
@@ -18,15 +18,17 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "numpy>=1.24",
     "pyyaml",
-    "lerobot==0.4.3",
+    "pynput",
+    "lerobot==0.6.1",
+    "lerobot[dataset]",
+    "lerobot[deepdiff-dep]",
+    "lerobot[viz]",
     "xarm-python-sdk",
     "opencv-python",
 ]

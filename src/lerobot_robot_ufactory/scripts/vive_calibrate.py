@@ -16,18 +16,21 @@ if os.path.exists(config_path):
     os.remove(config_path)
 ctx = pysurvive.SimpleContext(argv)
 
-for obj in ctx.Objects():
-    print("*device:", obj.Name())
+try:
+    for obj in ctx.Objects():
+        print("*device:", obj.Name())
 
-next_print_time = time.monotonic()
-while ctx.Running():
-    updated = ctx.NextUpdated()
-    if updated:
-        pose, ts = updated.Pose()
-        name = updated.Name().decode("utf-8")
-        serial_number = None
-        if hasattr(pysurvive, "simple_serial_number"):
-            serial_number = pysurvive.simple_serial_number(updated.ptr).decode("utf-8")
-        pos = [pose.Pos[0], pose.Pos[1], pose.Pos[2]]
-        rot = [pose.Rot[0], pose.Rot[1], pose.Rot[2], pose.Rot[3]]
-        print('[{}][{}] POS: {}, ROT: {}'.format(name, serial_number, pos, rot))
+    next_print_time = time.monotonic()
+    while ctx.Running():
+        updated = ctx.NextUpdated()
+        if updated:
+            pose, ts = updated.Pose()
+            name = updated.Name().decode("utf-8")
+            serial_number = None
+            if hasattr(pysurvive, "simple_serial_number"):
+                serial_number = pysurvive.simple_serial_number(updated.ptr).decode("utf-8")
+            pos = [pose.Pos[0], pose.Pos[1], pose.Pos[2]]
+            rot = [pose.Rot[0], pose.Rot[1], pose.Rot[2], pose.Rot[3]]
+            print('[{}][{}] POS: {}, ROT: {}'.format(name, serial_number, pos, rot))
+finally:
+    ctx.close()

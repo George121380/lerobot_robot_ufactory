@@ -130,20 +130,35 @@ class UmiTeleop(UFBaseTeleop):
             raise DeviceNotConnectedError(f'[{self.prefix}UMI{self.config.serial_number}] SLAM is not ready, please check the device and try again.')
 
     def connect(self, calibrate: bool = False) -> None:
-        from lerobot_robot_ufactory.devices.umi.xvlib import XVLib
-        self.tracker = ViveTracker() if self.config.use_vive_tracker else None
-        self.xvlib = XVLib(self.config.serial_number, False, self.config.use_gripper)
-        if not self.config.use_vive_tracker:
-            time.sleep(1) # wait xvlib init
-            self.xvlib.xv_slam_init()
-            time.sleep(1) # wait slam init
-        if self.config.use_gripper:
-            self.xvlib.xv_clamp_stream_init()
-        self._is_connected = True
-        super().connect(calibrate)
+        try:
+            from lerobot_robot_ufactory.devices.umi.xvlib import XVLib
+            self.tracker = ViveTracker() if self.config.use_vive_tracker else None
+            self.xvlib = XVLib(self.config.serial_number, False, self.config.use_gripper)
+            if not self.config.use_vive_tracker:
+                time.sleep(1) # wait xvlib init
+                self.xvlib.xv_slam_init()
+                time.sleep(1) # wait slam init
+            if self.config.use_gripper:
+                self.xvlib.xv_clamp_stream_init()
+            self._is_connected = True
+            super().connect(calibrate)
+            if not self.config.use_vive_tracker:
+                self.wait_slam_ready()
+        except Exception:
+            self._cleanup()
+            raise
 
-        if not self.config.use_vive_tracker:
-            self.wait_slam_ready()
+    def _cleanup(self):
+        if hasattr(self, "xvlib") and self.xvlib is not None:
+            try:
+                self.xvlib.xv_uninit()
+            except Exception:
+                pass
+        if hasattr(self, "tracker") and self.tracker is not None:
+            try:
+                self.tracker.disconnect()
+            except Exception:
+                pass
 
     def disconnect(self):
         super().disconnect()

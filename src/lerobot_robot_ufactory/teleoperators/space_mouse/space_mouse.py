@@ -26,6 +26,7 @@ class SpaceMouseTeleop(Teleoperator, Thread):
         self.max_pos_speed = config.max_pos_speed
         deadzone = config.deadzone
         self._is_connected = False
+        self._is_calibrated = False
         self.dtype = np.float32 # CHECK! make it configurable ???
 
         if np.issubdtype(type(deadzone), np.number):
@@ -93,7 +94,7 @@ class SpaceMouseTeleop(Teleoperator, Thread):
 
     def disconnect(self):
         if not self._is_connected:
-            DeviceNotConnectedError(f"{self} is not connected.")
+            raise DeviceNotConnectedError(f"{self} is not connected.")
 
         self.stop_event.set()
         self._is_connected = False

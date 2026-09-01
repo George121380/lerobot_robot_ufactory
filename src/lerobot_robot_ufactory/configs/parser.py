@@ -6,6 +6,7 @@ from dataclasses import fields, is_dataclass
 from types import UnionType
 from typing import Union, get_args, get_origin
 from lerobot.configs.parser import *
+from lerobot.utils.utils import has_method  # 0.6.1 的 parser 不再导出 has_method
 
 
 def _is_choice_registry(config_type):
@@ -129,20 +130,33 @@ def wrap(config_path: Path | None = None) -> Callable[[F], F]:
                         # add the relevant CLI arg to the error message
                         raise PluginLoadError(f"{e}\nFailed plugin CLI Arg: {plugin_cli_arg}") from e
                     cli_args = filter_arg(plugin_cli_arg, cli_args)
+                if "--help" in cli_args or "-h" in cli_args:
+                    print_scoped_help(argtype, cli_args)
+                    sys.exit(0)
                 config_path_cli, cli_args = _pop_cli_arg("config_path", cli_args)
                 if has_method(argtype, "__get_path_fields__"):
                     path_fields = argtype.__get_path_fields__()
                     cli_args = filter_path_args(path_fields, cli_args)
-                if has_method(argtype, "from_pretrained") and config_path_cli:
-                    cfg = argtype.from_pretrained(config_path_cli, cli_args=cli_args)
-                else:
-                    config_path_for_parse = Path(config_path_cli) if config_path_cli else config_path
-                    filtered_path, temp_path = _filtered_config_path(argtype, config_path_for_parse)
-                    try:
-                        cfg = draccus.parse(config_class=argtype, config_path=filtered_path, args=cli_args)
-                    finally:
-                        if temp_path is not None:
-                            temp_path.unlink(missing_ok=True)
+                    # Also extract path fields from the YAML/JSON config file
+                    if config_path_cli:
+                        config_path_cli = extract_path_fields_from_config(config_path_cli, path_fields)
+                try:
+                    if has_method(argtype, "from_pretrained") and config_path_cli:
+                        cli_args = filter_arg("config_path", cli_args)
+                        cfg = argtype.from_pretrained(config_path_cli, cli_args=cli_args)
+                    else:
+                        if config_path_cli:
+                            cli_args = filter_arg("config_path", cli_args)
+                        config_path_for_parse = Path(config_path_cli) if config_path_cli else config_path
+                        filtered_path, temp_path = _filtered_config_path(argtype, config_path_for_parse)
+                        try:
+                            cfg = draccus.parse(config_class=argtype, config_path=filtered_path, args=cli_args)
+                        finally:
+                            if temp_path is not None:
+                                temp_path.unlink(missing_ok=True)
+                except DecodingError as e:
+                    print(f"error: {e}", file=sys.stderr)
+                    sys.exit(1)
             response = fn(cfg, *args, **kwargs)
             return response
 

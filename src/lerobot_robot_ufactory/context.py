@@ -1,19 +1,24 @@
 """上下文变量，用于跨模块共享运行时对象，避免属性注入。"""
 import contextvars
 
-_active_teleops: contextvars.ContextVar = contextvars.ContextVar("active_teleops", default={})
+_active_teleops: contextvars.ContextVar = contextvars.ContextVar("active_teleops")
 
+def _get_teleops():
+    try:
+        return _active_teleops.get()
+    except LookupError:
+        return {}
 
 def register_teleop(teleop) -> None:
     """注册 teleop, 以 teleop.id 为 key"""
-    teleops = _active_teleops.get()
+    teleops = _get_teleops().copy()
     teleops[teleop.id] = teleop
     _active_teleops.set(teleops)
 
 
 def unregister_teleop(teleop) -> None:
     """移除 teleop"""
-    teleops = _active_teleops.get()
+    teleops = _get_teleops().copy()
     teleops.pop(teleop.id, None)
     _active_teleops.set(teleops)
 

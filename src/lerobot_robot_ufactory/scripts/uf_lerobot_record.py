@@ -1,517 +1,41 @@
 import sys
-import gc
-import copy
-import time
-import queue
-import pickle
 import argparse
 import logging
-import shutil
-import threading
-from pathlib import Path
-import torch
+import time
+from dataclasses import asdict
+from pprint import pformat
 import lerobot_robot_ufactory # patch
-from lerobot.scripts.lerobot_record import *
+from lerobot.scripts.lerobot_record import (
+    RecordConfig, RobotProcessorPipeline, LeRobotDataset, VideoEncodingManager,
+    init_logging, make_robot_from_config, make_teleoperator_from_config, make_default_processors,
+    combine_feature_dicts, aggregate_pipeline_dataset_features, create_initial_features,
+    sanity_check_dataset_robot_compatibility, register_third_party_plugins
+)
+from lerobot.utils.visualization_utils import (
+    init_visualization,
+    shutdown_visualization,
+)
+from lerobot.configs import parser
+from lerobot_robot_ufactory.scripts._uf_lerobot.record_loop import record_loop  # 覆盖星号导入的原生 record_loop
+from lerobot_robot_ufactory.scripts._uf_lerobot.async_saver import (
+    AsyncEpisodeSaver,
+    _current_episode_index,
+    _get_episode_buffer,
+    _set_episode_buffer,
+    _episode_buffer_size,
+    _episode_buffer_index,
+    _create_empty_episode_buffer,
+)
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
-from lerobot_robot_ufactory.utils.utils import init_keyboard_listener
-
-
-def _get_dataset_writer(dataset):
-    return getattr(dataset, "writer", None)
-
-
-def _get_episode_buffer(dataset):
-    try:
-        return dataset.episode_buffer
-    except AttributeError:
-        pass
-
-    writer = _get_dataset_writer(dataset)
-    if writer is not None and hasattr(writer, "episode_buffer"):
-        return writer.episode_buffer
-    raise RuntimeError("Unable to access dataset episode buffer for async save.")
-
-
-def _set_episode_buffer(dataset, episode_buffer):
-    updated = False
-    writer = _get_dataset_writer(dataset)
-    if writer is not None and hasattr(writer, "episode_buffer"):
-        writer.episode_buffer = episode_buffer
-        updated = True
-
-    try:
-        getattr(dataset, "episode_buffer")
-    except AttributeError:
-        pass
-    else:
-        try:
-            dataset.episode_buffer = episode_buffer
-            updated = True
-        except AttributeError:
-            pass
-
-    if not updated:
-        raise RuntimeError("Unable to replace dataset episode buffer for async save.")
-
-
-def _to_int(value):
-    if isinstance(value, (list, tuple)):
-        return int(value[0])
-    if hasattr(value, "item"):
-        try:
-            return int(value.item())
-        except (TypeError, ValueError):
-            pass
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(value[0])
-
-
-def _episode_buffer_size(episode_buffer):
-    return _to_int(episode_buffer.get("size", 0))
-
-
-def _episode_buffer_index(episode_buffer):
-    return _to_int(episode_buffer["episode_index"])
-
-
-def _current_episode_index(dataset):
-    try:
-        return _episode_buffer_index(_get_episode_buffer(dataset))
-    except Exception:
-        return dataset.num_episodes
-
-
-def _create_empty_episode_buffer(dataset, episode_index, template_episode_buffer):
-    writer = _get_dataset_writer(dataset)
-
-    if writer is not None and hasattr(writer, "_create_episode_buffer"):
-        episode_buffer = writer._create_episode_buffer()
-    elif hasattr(dataset, "create_episode_buffer"):
-        episode_buffer = dataset.create_episode_buffer(episode_index=episode_index)
-    elif hasattr(dataset, "_create_episode_buffer"):
-        episode_buffer = dataset._create_episode_buffer()
-    else:
-        episode_buffer = copy.deepcopy(template_episode_buffer)
-        for key, value in list(episode_buffer.items()):
-            if key == "size":
-                episode_buffer[key] = 0
-            elif key == "episode_index":
-                continue
-            elif isinstance(value, list):
-                episode_buffer[key] = []
-            else:
-                episode_buffer[key] = []
-
-    if _episode_buffer_index(episode_buffer) != episode_index:
-        episode_buffer["episode_index"] = episode_index
-    return episode_buffer
-
-
-def _create_next_episode_buffer(dataset, current_episode_buffer):
-    current_episode_index = _episode_buffer_index(current_episode_buffer)
-    return _create_empty_episode_buffer(dataset, current_episode_index + 1, current_episode_buffer)
-
-
-def _release_unused_memory():
-    gc.collect()
-    if not sys.platform.startswith("linux"):
-        return
-    try:
-        import ctypes
-
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
-    except Exception:
-        pass
-
-
-class ImageWriterSaveBarrier:
-    def __init__(self, image_writer, max_pending_image_tasks=8192):
-        self.image_writer = image_writer
-        self._max_pending_image_tasks = max(0, int(max_pending_image_tasks))
-        self._condition = threading.Condition()
-        self._submitted = 0
-        self._completed = 0
-        self._reported_backpressure = False
-        self._original_task_done = None
-
-    @classmethod
-    def install(cls, dataset, max_pending_image_tasks=8192):
-        image_writer = getattr(dataset, "image_writer", None)
-        if image_writer is None:
-            return None
-
-        existing = getattr(image_writer, "_uf_save_barrier", None)
-        if existing is not None:
-            return existing
-
-        barrier = cls(image_writer, max_pending_image_tasks)
-        if barrier._install():
-            image_writer._uf_save_barrier = barrier
-            return barrier
-        return None
-
-    def _install(self):
-        if getattr(self.image_writer, "num_processes", 0) != 0:
-            return False
-
-        task_queue = getattr(self.image_writer, "queue", None)
-        if task_queue is None:
-            return False
-
-        self._original_task_done = task_queue.task_done
-
-        def save_image(image, fpath, compress_level=1):
-            if isinstance(image, torch.Tensor):
-                image = image.cpu().numpy()
-            with self._condition:
-                while (
-                    self._max_pending_image_tasks > 0
-                    and self._submitted - self._completed >= self._max_pending_image_tasks
-                ):
-                    if not self._reported_backpressure:
-                        log_say(
-                            f"[Async] waiting for image writer backlog "
-                            f"({self._max_pending_image_tasks}) to release memory...",
-                            False
-                        )
-                        self._reported_backpressure = True
-                    self._condition.wait()
-                self._submitted += 1
-            task_queue.put((image, fpath, compress_level))
-
-        def task_done():
-            self._original_task_done()
-            with self._condition:
-                self._completed += 1
-                self._condition.notify_all()
-
-        self.image_writer.save_image = save_image
-        task_queue.task_done = task_done
-        return True
-
-    def snapshot(self):
-        with self._condition:
-            return self._submitted
-
-    def wait_until_done(self, snapshot):
-        with self._condition:
-            while self._completed < snapshot:
-                self._condition.wait()
-
-
-class AsyncEpisodeSaver:
-    _STOP = object()
-
-    def __init__(self, dataset, max_pending_saves=5, max_pending_image_tasks=8192):
-        self.dataset = dataset
-        self._queue = queue.Queue()
-        self._max_pending_saves = max(1, int(max_pending_saves))
-        self._max_pending_image_tasks = max(0, int(max_pending_image_tasks))
-        self._pending_save_slots = threading.BoundedSemaphore(self._max_pending_saves)
-        self._spool_dir = Path(dataset.root) / ".uf_async_episode_spool"
-        self._spool_dir.mkdir(parents=True, exist_ok=True)
-        self._total_cnts = 0
-        self._finish_cnts = 0
-        self._exception = None
-        self._wait_context = threading.local()
-        self._image_writer_barrier = ImageWriterSaveBarrier.install(dataset, self._max_pending_image_tasks)
-        self._original_wait_image_writer = getattr(dataset, "_wait_image_writer", None)
-        if self._image_writer_barrier is not None and self._original_wait_image_writer is not None:
-            self._patch_dataset_image_writer_wait()
-        elif getattr(dataset, "image_writer", None) is not None:
-            log_say("[Async] image writer barrier is unavailable; async saves may wait for active recording.", False)
-        self._thread = threading.Thread(target=self._run, name="uf-async-episode-saver", daemon=True)
-        self._thread.start()
-
-    def submit_current_episode(self):
-        self._raise_if_failed()
-        if not self._pending_save_slots.acquire(blocking=False):
-            log_say(f"[Async] waiting for pending saves ({self._max_pending_saves}) to release memory...", False)
-            self._pending_save_slots.acquire()
-
-        try:
-            self._raise_if_failed()
-            episode_buffer = _get_episode_buffer(self.dataset)
-            if _episode_buffer_size(episode_buffer) == 0:
-                raise RuntimeError("Cannot async save an empty episode buffer.")
-
-            episode_index = _episode_buffer_index(episode_buffer)
-            next_episode_buffer = _create_next_episode_buffer(self.dataset, episode_buffer)
-            _set_episode_buffer(self.dataset, next_episode_buffer)
-            image_writer_snapshot = self._image_writer_snapshot()
-            spool_path = self._write_episode_spool(episode_index, episode_buffer)
-            self._queue.put((episode_index, episode_buffer, image_writer_snapshot, spool_path))
-            log_say(f"[Async] episode {episode_index} submitted for async save, all_pending={self._queue.qsize()}", False)
-        except BaseException:
-            self._pending_save_slots.release()
-            raise
-        return episode_index
-
-    def wait_idle(self):
-        self._queue.join()
-        self._raise_if_failed()
-
-    def close(self):
-        try:
-            self._queue.join()
-            self._queue.put(self._STOP)
-            self._queue.join()
-            self._thread.join()
-            self._raise_if_failed()
-        finally:
-            self._restore_dataset_image_writer_wait()
-
-    def _run(self):
-        while True:
-            item = self._queue.get()
-            release_pending_slot = False
-            episode_buffer = None
-            try:
-                if item is self._STOP:
-                    return
-                release_pending_slot = True
-                episode_index, episode_buffer, image_writer_snapshot, spool_path = item
-                log_say(f"[Episode {episode_index}] async saving ...", False)
-                try:
-                    self._wait_context.image_writer_snapshot = image_writer_snapshot
-                    self.dataset.save_episode(episode_data=episode_buffer)
-                except TypeError as exc:
-                    if "episode_data" in str(exc):
-                        raise RuntimeError(
-                            "--async-save requires LeRobotDataset.save_episode(episode_data=...)."
-                        ) from exc
-                    raise
-                self._delete_saved_image_dirs(episode_index)
-                self._delete_episode_spool(spool_path)
-                log_say(f"[Episode {episode_index}] async save finish, all_pending={self._queue.qsize()}", False)
-            except BaseException as exc:
-                self._exception = exc
-                log_say(f"[Episode {episode_index}] async save failed, {exc}", False)
-            finally:
-                if hasattr(self._wait_context, "image_writer_snapshot"):
-                    del self._wait_context.image_writer_snapshot
-                if isinstance(episode_buffer, dict):
-                    episode_buffer.clear()
-                item = None
-                episode_buffer = None
-                _release_unused_memory()
-                if release_pending_slot:
-                    self._pending_save_slots.release()
-                self._queue.task_done()
-
-    def _write_episode_spool(self, episode_index, episode_buffer):
-        spool_path = self._spool_dir / f"episode-{episode_index:06d}.pkl"
-        tmp_path = spool_path.with_suffix(".pkl.tmp")
-        with tmp_path.open("wb") as f:
-            pickle.dump(
-                {"episode_index": episode_index, "episode_buffer": episode_buffer},
-                f,
-                protocol=pickle.HIGHEST_PROTOCOL,
-            )
-        tmp_path.replace(spool_path)
-        return spool_path
-
-    def _delete_episode_spool(self, spool_path):
-        if spool_path is not None:
-            Path(spool_path).unlink(missing_ok=True)
-
-    def _patch_dataset_image_writer_wait(self):
-        def wait_image_writer_for_current_context():
-            image_writer_snapshot = getattr(self._wait_context, "image_writer_snapshot", None)
-            if image_writer_snapshot is not None:
-                self._image_writer_barrier.wait_until_done(image_writer_snapshot)
-            else:
-                self._original_wait_image_writer()
-
-        self.dataset._wait_image_writer = wait_image_writer_for_current_context
-
-    def _restore_dataset_image_writer_wait(self):
-        if self._original_wait_image_writer is not None:
-            self.dataset._wait_image_writer = self._original_wait_image_writer
-
-    def _image_writer_snapshot(self):
-        if self._image_writer_barrier is None:
-            return None
-        return self._image_writer_barrier.snapshot()
-
-    def _delete_saved_image_dirs(self, episode_index):
-        writer = _get_dataset_writer(self.dataset)
-        meta = getattr(writer, "_meta", getattr(self.dataset, "meta", None))
-        image_keys = getattr(meta, "image_keys", [])
-        image_dir_owner = writer if writer is not None and hasattr(writer, "_get_image_file_dir") else self.dataset
-        if not image_keys or not hasattr(image_dir_owner, "_get_image_file_dir"):
-            return
-
-        for cam_key in image_keys:
-            img_dir = image_dir_owner._get_image_file_dir(episode_index, cam_key)
-            if img_dir.is_dir():
-                shutil.rmtree(img_dir)
-
-    def _raise_if_failed(self):
-        if self._exception is not None:
-            raise RuntimeError("Async episode save failed.") from self._exception
-    
-
-@safe_stop_image_writer
-def record_loop(
-    robot: Robot,
-    events: dict,
-    fps: int,
-    teleop_action_processor: RobotProcessorPipeline[
-        tuple[RobotAction, RobotObservation], RobotAction
-    ],  # runs after teleop
-    robot_action_processor: RobotProcessorPipeline[
-        tuple[RobotAction, RobotObservation], RobotAction
-    ],  # runs before robot
-    robot_observation_processor: RobotProcessorPipeline[
-        RobotObservation, RobotObservation
-    ],  # runs after robot
-    dataset: LeRobotDataset | None = None,
-    teleop: Teleoperator | list[Teleoperator] | None = None,
-    policy: PreTrainedPolicy | None = None,
-    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
-    postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
-    control_time_s: int | None = None,
-    single_task: str | None = None,
-    display_data: bool = False,
-    display_compressed_images: bool = False,
-    frame_callback: callable = None,
-):
-    if dataset is not None and dataset.fps != fps:
-        raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
-
-    teleop_arm = teleop_keyboard = None
-    if isinstance(teleop, list):
-        teleop_keyboard = next((t for t in teleop if isinstance(t, KeyboardTeleop)), None)
-        teleop_arm = next(
-            (
-                t
-                for t in teleop
-                if isinstance(
-                    t,
-                    (
-                        so_leader.SO100Leader
-                        | so_leader.SO101Leader
-                        | koch_leader.KochLeader
-                        | omx_leader.OmxLeader
-                    ),
-                )
-            ),
-            None,
-        )
-
-        if not (teleop_arm and teleop_keyboard and len(teleop) == 2 and robot.name == "lekiwi_client"):
-            raise ValueError(
-                "For multi-teleop, the list must contain exactly one KeyboardTeleop and one arm teleoperator. Currently only supported for LeKiwi robot."
-            )
-
-    # Reset policy and processor if they are provided
-    if policy is not None and preprocessor is not None and postprocessor is not None:
-        policy.reset()
-        preprocessor.reset()
-        postprocessor.reset()
-
-    last_robot_cmd = robot.get_observation()
-    # only positional cmd for now: Remove velo from observation for cmd if needed!
-    last_robot_cmd = { k: v for k,v in last_robot_cmd.items() if not "vel" in k }
-
-    timestamp = 0
-    start_episode_t = time.perf_counter()
-    while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
-
-        if events["exit_early"]:
-            events["exit_early"] = False
-            break
-
-        # Get robot observation
-        obs = robot.get_observation()
-
-        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
-        obs_processed = robot_observation_processor(obs)
-
-        if policy is not None or dataset is not None:
-            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
-
-        # Get action from either policy or teleop
-        if policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action(
-                observation=observation_frame,
-                policy=policy,
-                device=get_safe_torch_device(policy.config.device),
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                use_amp=policy.config.use_amp,
-                task=single_task,
-                robot_type=robot.robot_type,
-            )
-
-            act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
-
-        elif policy is None and isinstance(teleop, Teleoperator):
-            act = teleop.get_action()
-
-            # (space mouse) from delta Cartesian cmd to absolute command
-            if "pose.dx" in act:
-                last_robot_cmd.update({"pose.x": last_robot_cmd["pose.x"] + act["pose.dx"], "pose.y": last_robot_cmd["pose.y"] + act["pose.dy"], "pose.z": last_robot_cmd["pose.z"] + act["pose.dz"]})
-                act = last_robot_cmd.copy() # watch out this is shallow copy, not for nested dict
-
-            # Applies a pipeline to the raw teleop action, default is IdentityProcessor
-            act_processed_teleop = teleop_action_processor((act, obs))
-
-        elif policy is None and isinstance(teleop, list):
-            arm_action = teleop_arm.get_action()
-            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
-            keyboard_action = teleop_keyboard.get_action()
-            base_action = robot._from_keyboard_to_base_action(keyboard_action)
-            act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
-            act_processed_teleop = teleop_action_processor((act, obs))
-        else:
-            logging.info(
-                "No policy or teleoperator provided, skipping action generation."
-                "This is likely to happen when resetting the environment without a teleop device."
-                "The robot won't be at its rest position at the start of the next episode."
-            )
-            continue
-
-        # Applies a pipeline to the action, default is IdentityProcessor
-        if policy is not None and act_processed_policy is not None:
-            action_values = act_processed_policy
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
-        else:
-            action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
-
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
-
-        # Write to dataset
-        if dataset is not None:
-            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-            frame = {**observation_frame, **action_frame, "task": single_task}
-            if frame_callback is not None:
-                frame = frame_callback(frame)
-            dataset.add_frame(frame)
-
-        if display_data:
-            log_rerun_data(
-                observation=obs_processed, action=action_values, compress_images=display_compressed_images
-            )
-
-        dt_s = time.perf_counter() - start_loop_t
-        precise_sleep(max(1 / fps - dt_s, 0.0))
-
-        timestamp = time.perf_counter() - start_episode_t
+from lerobot_robot_ufactory.utils.keyboard import KeyboardState, register_keyboard_controls
 
 
 def record(
     cfg: RecordConfig,
+    teleop_action_processor: RobotProcessorPipeline | None = None,
+    robot_action_processor: RobotProcessorPipeline | None = None,
+    robot_observation_processor: RobotProcessorPipeline | None = None,
     async_save: bool = False,
     async_save_max_pending: int = 5,
     async_save_max_image_tasks: int = 8192,
@@ -519,12 +43,28 @@ def record(
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
-        init_rerun(session_name="recording")
+        init_visualization(
+            cfg.display_mode, session_name="recording", ip=cfg.display_ip, port=cfg.display_port
+        )
+    display_compressed_images = (
+        True
+        if (cfg.display_data and cfg.display_ip is not None and cfg.display_port is not None)
+        else cfg.display_compressed_images
+    )
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
-    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    # Fall back to identity pipelines when the caller doesn't supply processors.
+    if (
+        teleop_action_processor is None
+        or robot_action_processor is None
+        or robot_observation_processor is None
+    ):
+        _t, _r, _o = make_default_processors()
+        teleop_action_processor = teleop_action_processor or _t
+        robot_action_processor = robot_action_processor or _r
+        robot_observation_processor = robot_observation_processor or _o
 
     dataset_features = combine_feature_dicts(
         aggregate_pipeline_dataset_features(
@@ -541,227 +81,228 @@ def record(
         ),
     )
 
-    if cfg.resume:
-        dataset = LeRobotDataset(
-            cfg.dataset.repo_id,
-            root=cfg.dataset.root,
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-        )
+    dataset = None
+    listener = None
 
-        if hasattr(robot, "cameras") and len(robot.cameras) > 0:
-            dataset.start_image_writer(
-                num_processes=cfg.dataset.num_image_writer_processes,
-                num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+    try:
+        if cfg.resume:
+            num_cameras = len(robot.cameras) if hasattr(robot, 'cameras') else 0
+            dataset = LeRobotDataset.resume(
+                cfg.dataset.repo_id,
+                root=cfg.dataset.root,
+                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                rgb_encoder=cfg.dataset.rgb_encoder,
+                depth_encoder=cfg.dataset.depth_encoder,
+                encoder_threads=cfg.dataset.encoder_threads,
+                streaming_encoding=cfg.dataset.streaming_encoding,
+                encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                image_writer_processes=cfg.dataset.num_image_writer_processes if num_cameras > 0 else 0,
+                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras
+                if num_cameras > 0
+                else 0,
             )
-        sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
-    else:
-        # Create empty dataset or load existing saved episodes
-        sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
-        dataset = LeRobotDataset.create(
-            cfg.dataset.repo_id,
-            cfg.dataset.fps,
-            root=cfg.dataset.root,
-            robot_type=robot.name,
-            features=dataset_features,
-            use_videos=cfg.dataset.video,
-            image_writer_processes=cfg.dataset.num_image_writer_processes,
-            image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-        )
-
-    # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
-    preprocessor = None
-    postprocessor = None
-    if cfg.policy is not None:
-        preprocessor, postprocessor = make_pre_post_processors(
-            policy_cfg=cfg.policy,
-            pretrained_path=cfg.policy.pretrained_path,
-            dataset_stats=rename_stats(dataset.meta.stats, cfg.dataset.rename_map),
-            preprocessor_overrides={
-                "device_processor": {"device": cfg.policy.device},
-                "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
-            },
-        )
-
-    robot.connect()
-    if teleop is not None:
-        teleop.connect()
-
-    is_evt = not is_headless()
-    is_uf_teleop = isinstance(teleop, UFBaseTeleop)
-    is_recorded = False
-    key_dict = {}
-    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
-
-    if is_evt:
-        from pynput import keyboard
-
-        key_dict = {
-            keyboard.Key.space: 0,  # start
-            keyboard.Key.enter: 0,  # help
-        }
-
-        def on_press(key):
-            try:
-                if key == keyboard.Key.right:
-                    print("Right arrow key pressed. Exiting loop...")
-                    events["exit_early"] = True
-                elif key == keyboard.Key.left:
-                    print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
-                    events["rerecord_episode"] = True
-                    events["exit_early"] = True
-                elif key == keyboard.Key.esc:
-                    print("Escape key pressed. Stopping data recording...")
-                    events["stop_recording"] = True
-                    events["exit_early"] = True
-            except Exception as e:
-                print(f"Error handling key press: {e}")
-            if key in key_dict:
-                key_dict[key] = True
-
-        def on_release(key):
-            try:
-                if key == keyboard.Key.enter:
-                    if not is_recorded:
-                        print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
-                    else:
-                        print('⌨   [ESC] Exit  [←] Reset  [→] Save')
-                    # is_recorded = True
-            except Exception as e:
-                print(f"Error handling key release: {e}")
-            if key in key_dict:
-                key_dict[key] = False
-
-        listener, events = init_keyboard_listener(events=events, on_press=on_press, on_release=on_release)
-        print("\n********** Episode Record Loop Start **********")
-        print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
-    else:
-        input('⌨   Press Enter to start record >>> ')
-        if is_uf_teleop:
-            teleop.set_teleop_enabled(True)
-        is_recorded = True
-        print('\n********** Episode Record Loop Start **********')
-
-    frame_callback = None
-    async_episode_saver = (
-        AsyncEpisodeSaver(dataset, async_save_max_pending, async_save_max_image_tasks)
-        if async_save
-        else None
-    )
-    if async_episode_saver is not None:
-        print('Async episode saving is enabled.')
-
-    with VideoEncodingManager(dataset):
-        recorded_episodes = 0
-        while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-            time.sleep(0.01)
-            if is_evt:
-                if not is_recorded and key_dict[keyboard.Key.space]:
-                    is_recorded = True
-
-            if teleop is not None and isinstance(teleop, UFMockTeleop):
-                if events["stop_recording"]:
-                    continue
-                teleop.configure(events=events)
-                if events["rerecord_episode"]:
-                    events["rerecord_episode"] = False
-                    events["exit_early"] = False
-                    input('\n⌨   Press Enter to regenerate random target location >>>>> ')
-                    continue
-                if events["stop_recording"]:
-                    continue
-                is_recorded = True
-
-            if is_recorded:
-                events["rerecord_episode"] = False
-                events["exit_early"] = False
-                if is_uf_teleop:
-                    robot.configure()
-                    obs = robot.get_observation()
-                    teleop.set_teleop_enabled(True, obs)
-                log_say(f"Recording episode {_current_episode_index(dataset)}", cfg.play_sounds)
-                record_loop(
-                    robot=robot,
-                    events=events,
-                    fps=cfg.dataset.fps,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    dataset=dataset,
-                    control_time_s=cfg.dataset.episode_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
-                    frame_callback=frame_callback,
+            sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
+        else:
+            # Reject eval_ prefix — for policy evaluation use lerobot-rollout
+            repo_name = cfg.dataset.repo_id.split('/', 1)[-1]
+            if repo_name.startswith('eval_'):
+                raise ValueError(
+                    "Dataset names starting with 'eval_' are reserved for policy evaluation. "
+                    "lerobot-record is for data collection only. Use lerobot-rollout for policy deployment."
                 )
-            else:
-                continue
-            if events['stop_recording']:
-                break
-            if events["rerecord_episode"]:
-                log_say("Re-record episode", cfg.play_sounds)
-                events["rerecord_episode"] = False
-                events["exit_early"] = False
-                if is_uf_teleop:
-                    teleop.set_teleop_enabled(False)
-                episode_buffer = _get_episode_buffer(dataset)
-                if _episode_buffer_size(episode_buffer) > 0:
-                    if async_episode_saver is None:
-                        dataset.clear_episode_buffer()
-                    else:
-                        episode_index = _episode_buffer_index(episode_buffer)
-                        empty_episode_buffer = _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
-                        _set_episode_buffer(dataset, empty_episode_buffer)
-                is_recorded = False
-                if is_evt:
-                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
-                else:
-                    input('\n⌨   Press Enter to rerecord this episode >>>>> ')
-                    is_recorded = True
-                continue
+            cfg.dataset.stamp_repo_id()
+            dataset = LeRobotDataset.create(
+                cfg.dataset.repo_id,
+                cfg.dataset.fps,
+                root=cfg.dataset.root,
+                robot_type=robot.name,
+                features=dataset_features,
+                use_videos=cfg.dataset.video,
+                image_writer_processes=cfg.dataset.num_image_writer_processes,
+                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                rgb_encoder=cfg.dataset.rgb_encoder,
+                depth_encoder=cfg.dataset.depth_encoder,
+                encoder_threads=cfg.dataset.encoder_threads,
+                streaming_encoding=cfg.dataset.streaming_encoding,
+                encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+            )
 
-            if is_recorded and not events['stop_recording']:
-                episode_index = _current_episode_index(dataset)
-                if is_uf_teleop:
-                    teleop.set_teleop_enabled(False)
-                if async_episode_saver is None:
-                    log_say(f"[Episode {episode_index}] saving ...", cfg.play_sounds)
-                    dataset.save_episode()
-                    log_say(f"[Episode {episode_index}] save finish", cfg.play_sounds)
-                else:
-                    queued_episode_index = async_episode_saver.submit_current_episode()
-                    if queued_episode_index is not None:
-                        log_say(f"[Episode {queued_episode_index}] pushed to save queue", cfg.play_sounds)
+        # Connect the teleoperator before the robot so the robot isn't left idle (and possibly
+        # tripping a firmware watchdog) during teleop init. Matches lerobot_record.py.
+        if teleop is not None:
+            teleop.connect()
+        robot.connect()
 
-                recorded_episodes += 1
-                is_recorded = False
-                if is_evt:
-                    print('⌨   [ESC] Exit  [Space] Start  [←] Reset')
-                else:
-                    input('⌨   Press Enter to record at the next episode >>>>> ')
-                    is_recorded = True
+        is_uf_teleop = isinstance(teleop, UFBaseTeleop)
 
+        _events = {
+            'exit': False,
+            'exit_early': False,
+            'rerecord_episode': False,
+            'recorded': False,
+        }
+        _key_dict = {
+            'key.esc': False,   # exit
+            'key.enter': False, # help
+            'key.space': False, # record
+            'key.left': False,  # rerecord
+            'key.right': False, # save
+        }
+        kb_state = KeyboardState(key_dict=_key_dict, events=_events)
+
+        def on_key_press(key):
+            if key == 'key.enter':
+                if kb_state.get_event('recorded'):
+                    print('⌨   [ESC] Exit  [←] Discard(Rerecord)  [→] Save')
+                else:
+                    print('⌨   [ESC] Exit  [Space] Start Record')
+            elif key == 'key.esc':
+                kb_state.set_event('exit_early', True)
+            elif key == 'key.left':
+                kb_state.set_event('rerecord_episode', True)
+                kb_state.set_event('exit_early', True)
+            elif key == 'key.right':
+                kb_state.set_event('exit_early', True)
+            elif key == 'key.space':
+                if not kb_state.get_event('recorded'):
+                    kb_state.set_event('recorded', True)
+
+        listener, kb_state = register_keyboard_controls(
+            kb_state=kb_state,
+            on_press=on_key_press,
+            help_text='Episode Record Loop',
+        )
+        if not listener:
+            input('⌨   Press Enter to start record >>> ')
+            if is_uf_teleop:
+                teleop.set_teleop_enabled(True)
+            kb_state.set_event('recorded', True)
+            print('\n********** Episode Record Loop Start **********')
+
+        async_episode_saver = (
+            AsyncEpisodeSaver(dataset, async_save_max_pending, async_save_max_image_tasks)
+            if async_save
+            else None
+        )
         if async_episode_saver is not None:
-            log_say('Waiting for pending async episode saves, all_pending={}'.format(async_episode_saver._queue.qsize()), cfg.play_sounds)
-            async_episode_saver.close()
+            print('Async episode saving is enabled.')
 
-    print("\n********** Episode Record Loop Exit **********")
+        with VideoEncodingManager(dataset):
+            recorded_episodes = 0
+            while not kb_state.get_event('exit') and recorded_episodes < cfg.dataset.num_episodes:
+                time.sleep(0.01)
 
-    robot.disconnect()
-    if teleop is not None:
-        teleop.disconnect()
+                if teleop is not None and isinstance(teleop, UFMockTeleop):
+                    if kb_state.get_event('exit'):
+                        continue
+                    teleop.configure(events=kb_state.events)
+                    if kb_state.get_event('rerecord_episode'):
+                        kb_state.set_event('rerecord_episode', False)
+                        kb_state.set_event('exit_early', False)
+                        input('\n⌨   Press Enter to regenerate random target location >>>>> ')
+                        continue
+                    if kb_state.get_event('exit'):
+                        continue
+                    kb_state.set_event('recorded', True)
 
-    if is_evt and listener is not None:
-        listener.stop()
+                if kb_state.get_event('recorded'):
+                    kb_state.set_event("rerecord_episode", False)
+                    kb_state.set_event("exit_early", False)
+                    if is_uf_teleop:
+                        robot.configure()
+                        obs = robot.get_observation()
+                        teleop.set_teleop_enabled(True, obs)
+                    print(f'Recording episode {_current_episode_index(dataset)}')
+                    if listener:
+                        print('⌨   [ESC] Exit  [←] Discard(Rerecord)  [→] Save')
+                    record_loop(
+                        robot=robot,
+                        events=kb_state.events,
+                        fps=cfg.dataset.fps,
+                        teleop_action_processor=teleop_action_processor,
+                        robot_action_processor=robot_action_processor,
+                        robot_observation_processor=robot_observation_processor,
+                        teleop=teleop,
+                        dataset=dataset,
+                        control_time_s=cfg.dataset.episode_time_s,
+                        single_task=cfg.dataset.single_task,
+                        display_data=cfg.display_data,
+                        display_mode=cfg.display_mode,
+                        display_compressed_images=display_compressed_images,
+                    )
+                else:
+                    continue
+                if kb_state.get_event('exit'):
+                    break
+                if kb_state.get_event('rerecord_episode'):
+                    print('Re-record episode')
+                    kb_state.set_event('rerecord_episode', False)
+                    kb_state.set_event('exit_early', False)
+                    if is_uf_teleop:
+                        teleop.set_teleop_enabled(False)
+                    episode_buffer = _get_episode_buffer(dataset)
+                    if _episode_buffer_size(episode_buffer) > 0:
+                        if async_episode_saver is None:
+                            dataset.clear_episode_buffer()
+                        else:
+                            episode_index = _episode_buffer_index(episode_buffer)
+                            empty_episode_buffer = _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
+                            _set_episode_buffer(dataset, empty_episode_buffer)
+                    kb_state.set_event('recorded', False)
+                    if listener:
+                        print('⌨   [ESC] Exit  [Space] Start Re-record')
+                    else:
+                        input('\n⌨   Press Enter to rerecord this episode >>>>> ')
+                        kb_state.set_event('recorded', True)
+                    continue
 
-    if cfg.dataset.push_to_hub:
-        dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+                if kb_state.get_event('recorded') and not kb_state.get_event('exit'):
+                    episode_index = _current_episode_index(dataset)
+                    if is_uf_teleop:
+                        teleop.set_teleop_enabled(False)
+                    if async_episode_saver is None:
+                        print(f'[Episode {episode_index}] saving ...')
+                        dataset.save_episode()
+                        print(f'[Episode {episode_index}] save finish')
+                    else:
+                        queued_episode_index = async_episode_saver.submit_current_episode()
+                        if queued_episode_index is not None:
+                            print(f'[Episode {queued_episode_index}] pushed to save queue')
 
-    log_say("Exiting", cfg.play_sounds)
+                    recorded_episodes += 1
+                    kb_state.set_event('recorded', False)
+                    if listener:
+                        print('⌨   [ESC] Exit  [Space] Start Record')
+                    else:
+                        input('⌨   Press Enter to record at the next episode >>>>> ')
+                        kb_state.set_event('recorded', True)
+
+            if async_episode_saver is not None:
+                print('Waiting for pending async episode saves, all_pending={}'.format(async_episode_saver._queue.qsize()))
+                async_episode_saver.close()
+    finally:
+        print('\n********** Episode Record Loop Exit **********')
+
+        if dataset:
+            dataset.finalize()
+
+        if robot.is_connected:
+            robot.disconnect()
+        if teleop and teleop.is_connected:
+            teleop.disconnect()
+
+        if listener is not None:
+            listener.stop()
+
+        if cfg.display_data:
+            shutdown_visualization(cfg.display_mode)
+
+        if cfg.dataset.push_to_hub:
+            if dataset and dataset.num_episodes > 0:
+                dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+            else:
+                logging.warning('No episodes saved — skipping push to hub')
     return dataset
 
 @parser.wrap()
@@ -769,24 +310,24 @@ def get_cfg(cfg: RecordConfig) -> RecordConfig:
     return cfg
 
 def main():
-    parser = argparse.ArgumentParser(description='configuration args')
-    parser.add_argument('-r',
+    arg_parser = argparse.ArgumentParser(description='configuration args')
+    arg_parser.add_argument('-r',
                        action='store_true', # specify --resume if resume needs to be True
                        default=False,
                        help='Whether contitue recording on existing dataset (default: False)')
-    parser.add_argument('-a', '--async-save',
+    arg_parser.add_argument('-a', '--async-save',
                        action='store_true',
                        default=False,
                        help='Enable async background saving (default: False)')
-    parser.add_argument('--async-save-max-pending',
+    arg_parser.add_argument('--async-save-max-pending',
                        type=int,
                        default=5,
                        help='Maximum unfinished async episode saves kept in memory (default: 5)')
-    parser.add_argument('--async-save-max-image-tasks',
+    arg_parser.add_argument('--async-save-max-image-tasks',
                        type=int,
                        default=8192,
                        help='Maximum unfinished image write tasks kept in memory; 0 disables this limit (default: 8192)')
-    args, unknown = parser.parse_known_args()
+    args, unknown = arg_parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
     register_third_party_plugins()
     cfg = get_cfg()
@@ -801,5 +342,5 @@ def main():
     )
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

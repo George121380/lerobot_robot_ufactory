@@ -62,9 +62,9 @@ def check_pika_device(port):
         else:
             # logger.info('✗ 未检测到 Pika 设备: {}, 数据长度: {}'.format(port, len(data)))
             return 0
-    except:
-        pass
-    return -1
+    except (serial.SerialException, OSError) as exc:
+        logger.warning(f"Could not probe Pika on {port}: {exc}")
+        return -1
 
 
 class PikaDevice(object):
@@ -95,8 +95,7 @@ class PikaDevice(object):
         if (use_pika_sense and self._pika_sense_port is None) or (use_pika_gripper and self._pika_gripper_port is None):
             pika_ports = get_serial_ports()
             if not pika_ports:
-                logger.error('未找到Pika设备, 请检查连接')
-                exit(1)
+                raise RuntimeError('未找到Pika设备, 请检查连接')
 
             for port in pika_ports:
                 device_type = check_pika_device(port)
@@ -112,12 +111,10 @@ class PikaDevice(object):
                         break
         
             if use_pika_sense and self._pika_sense_port is None:
-                logger.error('未找到Pika Sense设备, 请检查连接')
-                exit(1)
+                raise RuntimeError('未找到Pika Sense设备, 请检查连接')
 
             if use_pika_gripper and self._pika_gripper_port is None:
-                logger.error('未找到Pika Gripper设备, 请检查连接')
-                exit(1)
+                raise RuntimeError('未找到Pika Gripper设备, 请检查连接')
 
         if use_pika_sense:
             print('Pika Sense设备:', self._pika_sense_port)
@@ -153,8 +150,7 @@ class PikaDevice(object):
             self._pika_sense = Sense(port=self._pika_sense_port)
             # 连接设备
             if not self._pika_sense.connect():
-                logger.error('连接Pika Sense设备失败')
-                exit(1)
+                raise RuntimeError('连接Pika Sense设备失败')
             logger.info('Pika Sense设备连接成功')
             self.PIKA_DEVICE_MAP[self._pika_sense_port] = self._pika_sense  # 注册共享
 
@@ -163,17 +159,15 @@ class PikaDevice(object):
 
             tracker = self._pika_sense.get_vive_tracker()
             if not tracker:
-                logger.error('Vive Tracker初始化失败')
                 self._pika_sense.disconnect()
-                exit(1)
+                raise RuntimeError('Vive Tracker初始化失败')
             logger.info('Vive Tracker初始化成功')
             time.sleep(2)
 
             devices = self._pika_sense.get_tracker_devices()
             if not devices:
-                logger.error('未检测到Vive Tracker设备')
                 self._pika_sense.disconnect()
-                exit(1)
+                raise RuntimeError('未检测到Vive Tracker设备')
             logger.info('检测到Vive Tracker设备: {}'.format(devices))
 
             self.pika_tracker_device = None
@@ -199,10 +193,9 @@ class PikaDevice(object):
             self.PIKA_DEVICE_MAP[self._pika_gripper_port] = self._pika_gripper  # 注册共享
             # 连接设备
             if not self._pika_gripper.connect():
-                logger.error('连接Pika Gripper设备失败')
                 if self._dev_type in [1, 3]:
                     self.pika_sense.disconnect()
-                exit(1)
+                raise RuntimeError('连接Pika Gripper设备失败')
             logger.info('Pika Gripper设备连接成功')
         return self._pika_gripper
 

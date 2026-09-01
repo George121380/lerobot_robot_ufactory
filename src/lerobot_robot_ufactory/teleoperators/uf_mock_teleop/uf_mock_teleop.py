@@ -194,7 +194,7 @@ class UFMockTeleop(Teleoperator, threading.Thread):
 
         if self.config.mock_type == 0:
             # 按一定概率随机执行方案1/2/3
-            val = val = random.random()
+            val = random.random()
             case_type = 1 if val < 0.66 else 2 if val < 0.88 else 3
         
         cnt = 0
@@ -377,8 +377,17 @@ class UFMockTeleop(Teleoperator, threading.Thread):
     
     def disconnect(self):
         self._is_connected = False
-        self.arm.set_state(4)
-        self.arm.disconnect()
+        try:
+            if hasattr(self, "arm") and self.arm is not None:
+                self.arm.set_state(4)
+                self.arm.disconnect()
+        finally:
+            if hasattr(self, "rt_sock") and self.rt_sock is not None:
+                try:
+                    self.rt_sock.close()
+                except Exception:
+                    pass
+                self.rt_sock = None
         self.join()
 
     def run(self):

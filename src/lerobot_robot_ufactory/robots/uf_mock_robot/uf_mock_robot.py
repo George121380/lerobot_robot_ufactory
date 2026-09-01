@@ -121,10 +121,12 @@ class UFMockRobot(Robot):
 
         self._is_connected = False
     
+    @property
     def is_calibrated(self) -> bool:
         """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
         return self._is_calibrated
 
+    @property
     def is_connected(self) -> bool:
         """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
         return self._is_connected

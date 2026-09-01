@@ -10,6 +10,8 @@ import lerobot_robot_ufactory.teleoperators.pika_teleop
 import lerobot_robot_ufactory.teleoperators.space_mouse
 import lerobot_robot_ufactory.teleoperators.umi_teleop
 
+_uf_patched = False
+
 def patch_lerobot_modules():
     """
     Patch lerobot modules to use uFactory robot implementations.
@@ -17,6 +19,9 @@ def patch_lerobot_modules():
     with the uFactory-specific implementations. It is intended to be called at the beginning of a script
     that uses the lerobot package, before any other imports from lerobot are made.
     """
+    global _uf_patched
+    if _uf_patched:
+        return
     from lerobot_robot_ufactory.cameras.utils import make_cameras_from_configs as _uf_make_cameras_from_configs
     from lerobot_robot_ufactory.robots.utils import make_robot_from_config as _uf_make_robot_from_config
     from lerobot_robot_ufactory.teleoperators.utils import make_teleoperator_from_config as _uf_make_teleoperator_from_config
@@ -36,6 +41,7 @@ def patch_lerobot_modules():
     _lerobot_robot_utils.make_robot_from_config = _uf_make_robot_from_config
     _lerobot_teleoperators_utils.make_teleoperator_from_config = _uf_make_teleoperator_from_config
     _lerobot_configs_parser.wrap = _uf_config_parser_wrap
+    _uf_patched = True
 
 _UF_LEROBOT_PATCH_TYPE = os.environ.get('UF_LEROBOT_PATCH_TYPE', '0')
 if _UF_LEROBOT_PATCH_TYPE == '1':

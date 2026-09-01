@@ -69,7 +69,7 @@ class UFRobot(Robot, Thread):
         self.prefix = '' if not prefix else f"{prefix}."
         self.config = config
         self._dof = config.robot_dof 
-        if self._dof == None or (not self._dof in (5,6,7)):
+        if self._dof is None or (not self._dof in (5, 6, 7)):
             raise ValueError(f"Please specify the correct DOF uf_robot!, got {self._dof}")
         
         self._control_space = self.config.control_space
@@ -181,38 +181,54 @@ class UFRobot(Robot, Thread):
         return action_ft
 
     def connect(self, calibrate: bool = True) -> None:
-        self.real_arm = XArmAPI(self.config.robot_ip)
-        time.sleep(0.2)
-        self._is_connected = self.real_arm.connected
-        if not self._is_connected:
-            print(f"UF Robot connection Failed, please check the hardware availability at ip: {self.config.robot_ip}")
-            raise ConnectionError()
+        connected_resources = []
+        try:
+            self.real_arm = XArmAPI(self.config.robot_ip)
+            time.sleep(0.2)
+            self._is_connected = self.real_arm.connected
+            if not self._is_connected:
+                print(f"UF Robot connection Failed, please check the hardware availability at ip: {self.config.robot_ip}")
+                raise ConnectionError()
 
-        if not self._dof == self.real_arm.axis:
-            print(f"[ERROR: ] Real Robot DOF({self.real_arm.axis}) does not match configuration ({self._dof})!")
-            self._is_connected = False
-            raise ConnectionError()
+            if self._dof != self.real_arm.axis:
+                self._is_connected = False
+                raise ConnectionError(f"Real Robot DOF({self.real_arm.axis}) does not match config ({self._dof})")
 
-        for cam in self.cameras.values():
-            cam.connect()
-            self._is_connected = self._is_connected and cam.is_connected
+            for cam in self.cameras.values():
+                cam.connect()
+                connected_resources.append(cam)
+                self._is_connected = self._is_connected and cam.is_connected
 
-        if not self._is_connected:
-            print("Could not connect to the cameras, check that all cameras are plugged-in.")
-            raise ConnectionError()
+            if not self._is_connected:
+                raise ConnectionError("Could not connect to all cameras, check that all cameras are plugged-in.")
 
-        # if self._gripper_type == GripperType.PikaGripper:
-        #     if not self.pika_gripper.connect():
-        #         print('Could not connect to pika gripper.')
-        #         raise ConnectionError()
+            # if self._gripper_type == GripperType.PikaGripper:
+            #     if not self.pika_gripper.connect():
+            #         print('Could not connect to pika gripper.')
+            #         raise ConnectionError()
 
-        self.configure()
-        if calibrate:  
-            self.calibrate()
+            self.configure()
+            if calibrate:
+                self.calibrate()
 
-        self.real_arm.set_linear_spd_limit_factor(2.0)
+            self.real_arm.set_linear_spd_limit_factor(2.0)
 
-        self._is_connected = True
+            self._is_connected = True
+        except:
+            self._cleanup_on_connect_failure(connected_resources)
+            raise
+
+    def _cleanup_on_connect_failure(self, connected_resources):
+        if self.real_arm is not None:
+            try:
+                self.real_arm.disconnect()
+            except Exception:
+                pass
+        for res in connected_resources:
+            try:
+                res.disconnect()
+            except Exception:
+                pass
 
     def configure(self) -> None:
         self.real_arm.motion_enable()
@@ -313,7 +329,7 @@ class UFRobot(Robot, Thread):
             if self._cart_obs_has_vel:
                 obs_dict.update({f"{self.prefix}velo.x": vel_list[0], f"{self.prefix}velo.y": vel_list[1], f"{self.prefix}velo.z": vel_list[2], f"{self.prefix}velo.rx": vel_list[3], f"{self.prefix}velo.ry": vel_list[4], f"{self.prefix}velo.rz": vel_list[5]})
         else:
-            ValueError(f"Please check the given control space of uf_robot! got {self._control_space}")
+            raise ValueError(f"Please check the given control space of uf_robot! got {self._control_space}")
         
         if self._gripper_type > GripperType.NoGripper:
             if self._gripper_type == GripperType.xArmGripper:
@@ -446,10 +462,12 @@ class UFRobot(Robot, Thread):
 
         self._is_connected = False
 
+    @property
     def is_calibrated(self) -> bool:
         """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
         return self._is_calibrated
 
+    @property
     def is_connected(self) -> bool:
         """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
         return self._is_connected
@@ -463,28 +481,33 @@ class UFRobot(Robot, Thread):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setblocking(True)
         sock.settimeout(1)
-        sock.connect((self.config.robot_ip, robot_port))
+        try:
+            sock.connect((self.config.robot_ip, robot_port))
 
-        buffer = sock.recv(4)
-        print(buffer)
-        while len(buffer) < 4:
-            buffer += sock.recv(4 - len(buffer))
-        size = convert.bytes_to_u32(buffer[:4])
-        print(f"UFACTORY Robot ({self.config.robot_ip}) RT Report Thread starts!! =======")
-        while not self.report_stop_event.is_set():
-            buffer += sock.recv(size - len(buffer))
-            if len(buffer) < size:
-                continue
-            data = buffer[:size]
-            buffer = buffer[size:]
-            with self._update_lock:
-                self.rt_actual_joint_pos = convert.bytes_to_fp32s(data[116:144], 7)
-                self.rt_actual_joint_speed = convert.bytes_to_fp32s(data[144:172], 7)
-                self.rt_cmd_tcp_pose = convert.bytes_to_fp32s(data[424:448], 6)
-                self.rt_cmd_tcp_vel = convert.bytes_to_fp32s(data[448:472], 6)
-                self.rt_actual_tcp_pose = convert.bytes_to_fp32s(data[472:496], 6)
-                self.rt_actual_tcp_speed = convert.bytes_to_fp32s(data[496:520], 6)
-            self._rt_report_normal = True
-
+            buffer = sock.recv(4)
+            print(buffer)
+            while len(buffer) < 4:
+                buffer += sock.recv(4 - len(buffer))
+            size = convert.bytes_to_u32(buffer[:4])
+            print(f"UFACTORY Robot ({self.config.robot_ip}) RT Report Thread starts!! =======")
+            while not self.report_stop_event.is_set():
+                buffer += sock.recv(size - len(buffer))
+                if len(buffer) < size:
+                    continue
+                data = buffer[:size]
+                buffer = buffer[size:]
+                with self._update_lock:
+                    self.rt_actual_joint_pos = convert.bytes_to_fp32s(data[116:144], 7)
+                    self.rt_actual_joint_speed = convert.bytes_to_fp32s(data[144:172], 7)
+                    self.rt_cmd_tcp_pose = convert.bytes_to_fp32s(data[424:448], 6)
+                    self.rt_cmd_tcp_vel = convert.bytes_to_fp32s(data[448:472], 6)
+                    self.rt_actual_tcp_pose = convert.bytes_to_fp32s(data[472:496], 6)
+                    self.rt_actual_tcp_speed = convert.bytes_to_fp32s(data[496:520], 6)
+                self._rt_report_normal = True
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
         self._rt_report_normal = False
         print(f"UFACTORY Robot ({self.config.robot_ip}) RT Report Thread Exit!! =======")

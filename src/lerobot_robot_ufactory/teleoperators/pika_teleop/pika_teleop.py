@@ -92,7 +92,7 @@ class PikaTeleop(UFBaseTeleop, Thread):
 
     def disconnect(self):
         if not self._is_connected:
-            DeviceNotConnectedError(f"{self} is not connected.")
+            raise DeviceNotConnectedError(f"{self} is not connected.")
 
         self.stop_event.set()
         self._is_connected = False
@@ -112,9 +112,10 @@ class PikaTeleop(UFBaseTeleop, Thread):
                 print(f'[{self.prefix}PIKA] Teleoperation is start')
             else:
                 obs = self._last_action
-                self._last_robot_pose = [obs[f"{self.prefix}pose.x"], obs[f"{self.prefix}pose.y"], obs[f"{self.prefix}pose.z"], obs[f"{self.prefix}pose.rx"], obs[f"{self.prefix}pose.ry"], obs[f"{self.prefix}pose.rz"]]
-                if self.config.use_gripper:
-                    self._last_gripper_pos = obs[f"{self.prefix}gripper.pos"]
+                if obs is not None:
+                    self._last_robot_pose = [obs[f"{self.prefix}pose.x"], obs[f"{self.prefix}pose.y"], obs[f"{self.prefix}pose.z"], obs[f"{self.prefix}pose.rx"], obs[f"{self.prefix}pose.ry"], obs[f"{self.prefix}pose.rz"]]
+                    if self.config.use_gripper:
+                        self._last_gripper_pos = obs[f"{self.prefix}gripper.pos"]
                 self._teleop_enabled = False
                 self._last_action = None
                 print(f'[{self.prefix}PIKA] Teleoperation has paused')
@@ -135,7 +136,7 @@ class PikaTeleop(UFBaseTeleop, Thread):
                     self.set_teleop_enabled(True, self._last_action)
                     time.sleep(1)
                 elif self._teleop_enabled and curr_state == init_state:
-                    self.self.set_teleop_enabled(False)
+                    self.set_teleop_enabled(False)
                     continue
 
     # delta action

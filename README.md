@@ -43,7 +43,7 @@ UFACTORY robot arm integration with the LeRobot framework for robot learning, da
 ## Requirements
 
 - Ubuntu 22.04 / 24.04
-- Python >= 3.10
+- Python >= 3.12
 - CUDA >= 12.0 (recommended for GPU training)
 - UFACTORY xArm (optional)
 
@@ -56,14 +56,14 @@ git clone https://github.com/xArm-Developer/lerobot_robot_ufactory.git
 cd lerobot_robot_ufactory
 
 # Create conda environment
-conda create -n uf_lerobot python=3.10 -y
+conda create -n uf_lerobot python=3.12 -y
 conda activate uf_lerobot
 
 # Install project
 pip install -e .
 ```
 
-Includes: `lerobot==0.4.3`, `xarm-python-sdk`, `numpy`, `pyyaml`. LeRobot already pulls in torch, opencv, wandb, etc.
+Includes: `lerobot==0.6.1`, `xarm-python-sdk`, `numpy`, `pyyaml`. LeRobot already pulls in torch, opencv, wandb, etc.
 
 ### Peripheral Modules
 
@@ -90,10 +90,16 @@ Pika Sense handheld + Vive Tracker, Cartesian-space control.
 * Base station positions for collection and inference do not need to be the same.
 
 ```bash
-# 1. Install peripheral deps (skip transitive deps)
-pip install pysurvive agx-pypika --no-deps
+# 1. Install libsurvive with source
+git clone https://github.com/cntools/libsurvive.git
+cd libsurvive
+pip install scikit-build
+python setup.py install
 
-# 2. Install udev rules (re-plug devices afterwards)
+# 2. Install peripheral deps (skip transitive deps)
+pip install agx-pypika --no-deps
+
+# 3. Install udev rules (re-plug devices afterwards)
 sudo cp src/rules/*.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
@@ -109,8 +115,11 @@ Universal Manipulation Interface + Vive Tracker, supports dual-arm.
 curl -sL https://raw.githubusercontent.com/xArm-Developer/ufactory_resources/main/fastumi/sdk/XVSDK_focal_amd64.deb -o /tmp/xvsdk.deb && sudo dpkg -i /tmp/xvsdk.deb
 sudo apt install -y --fix-broken
 
-# 2. Install peripheral deps
-pip install pysurvive --no-deps
+# 2. Install libsurvive with source
+git clone https://github.com/cntools/libsurvive.git
+cd libsurvive
+pip install scikit-build
+python setup.py install
 
 # 3. Install udev rules (re-plug devices afterwards)
 sudo cp src/rules/*.rules /etc/udev/rules.d/
