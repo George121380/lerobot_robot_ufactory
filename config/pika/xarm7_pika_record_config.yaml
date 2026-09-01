@@ -34,3 +34,4 @@ dataset:
   episode_time_s: 60  # max duration for one episode
   reset_time_s: 20    # (invalid) time for resetting env between episodes
   push_to_hub: False
+  streaming_encoding: True
