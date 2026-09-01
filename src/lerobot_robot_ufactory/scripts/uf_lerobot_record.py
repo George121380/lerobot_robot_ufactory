@@ -17,15 +17,6 @@ from lerobot.utils.visualization_utils import (
 )
 from lerobot.configs import parser
 from lerobot_robot_ufactory.scripts._uf_lerobot.record_loop import record_loop  # 覆盖星号导入的原生 record_loop
-from lerobot_robot_ufactory.scripts._uf_lerobot.async_saver import (
-    AsyncEpisodeSaver,
-    _current_episode_index,
-    _get_episode_buffer,
-    _set_episode_buffer,
-    _episode_buffer_size,
-    _episode_buffer_index,
-    _create_empty_episode_buffer,
-)
 from lerobot_robot_ufactory.teleoperators.uf_mock_teleop import UFMockTeleop
 from lerobot_robot_ufactory.teleoperators.base_teleop import UFBaseTeleop
 from lerobot_robot_ufactory.utils.keyboard import KeyboardState, register_keyboard_controls
@@ -36,9 +27,6 @@ def record(
     teleop_action_processor: RobotProcessorPipeline | None = None,
     robot_action_processor: RobotProcessorPipeline | None = None,
     robot_observation_processor: RobotProcessorPipeline | None = None,
-    async_save: bool = False,
-    async_save_max_pending: int = 5,
-    async_save_max_image_tasks: int = 8192,
 ) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
@@ -134,6 +122,11 @@ def record(
             teleop.connect()
         robot.connect()
 
+        if not cfg.dataset.streaming_encoding:
+            logging.info(
+                "Streaming encoding is disabled. If you have capable hardware, consider enabling it for way faster episode saving. --dataset.streaming_encoding=true --dataset.encoder_threads=2 # --dataset.rgb_encoder.vcodec=auto. More info in the documentation: https://huggingface.co/docs/lerobot/streaming_video_encoding"
+            )
+
         is_uf_teleop = isinstance(teleop, UFBaseTeleop)
 
         _events = {
@@ -180,14 +173,6 @@ def record(
             kb_state.set_event('recorded', True)
             print('\n********** Episode Record Loop Start **********')
 
-        async_episode_saver = (
-            AsyncEpisodeSaver(dataset, async_save_max_pending, async_save_max_image_tasks)
-            if async_save
-            else None
-        )
-        if async_episode_saver is not None:
-            print('Async episode saving is enabled.')
-
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while not kb_state.get_event('exit') and recorded_episodes < cfg.dataset.num_episodes:
@@ -213,7 +198,7 @@ def record(
                         robot.configure()
                         obs = robot.get_observation()
                         teleop.set_teleop_enabled(True, obs)
-                    print(f'Recording episode {_current_episode_index(dataset)}')
+                    print(f'Recording episode {dataset.num_episodes}')
                     if listener:
                         print('⌨   [ESC] Exit  [←] Discard(Rerecord)  [→] Save')
                     record_loop(
@@ -241,14 +226,7 @@ def record(
                     kb_state.set_event('exit_early', False)
                     if is_uf_teleop:
                         teleop.set_teleop_enabled(False)
-                    episode_buffer = _get_episode_buffer(dataset)
-                    if _episode_buffer_size(episode_buffer) > 0:
-                        if async_episode_saver is None:
-                            dataset.clear_episode_buffer()
-                        else:
-                            episode_index = _episode_buffer_index(episode_buffer)
-                            empty_episode_buffer = _create_empty_episode_buffer(dataset, episode_index, episode_buffer)
-                            _set_episode_buffer(dataset, empty_episode_buffer)
+                    dataset.clear_episode_buffer()
                     kb_state.set_event('recorded', False)
                     if listener:
                         print('⌨   [ESC] Exit  [Space] Start Re-record')
@@ -258,18 +236,11 @@ def record(
                     continue
 
                 if kb_state.get_event('recorded') and not kb_state.get_event('exit'):
-                    episode_index = _current_episode_index(dataset)
                     if is_uf_teleop:
                         teleop.set_teleop_enabled(False)
-                    if async_episode_saver is None:
-                        print(f'[Episode {episode_index}] saving ...')
-                        dataset.save_episode()
-                        print(f'[Episode {episode_index}] save finish')
-                    else:
-                        queued_episode_index = async_episode_saver.submit_current_episode()
-                        if queued_episode_index is not None:
-                            print(f'[Episode {queued_episode_index}] pushed to save queue')
-
+                    print(f'[Episode {dataset.num_episodes}] saving ...')
+                    dataset.save_episode()
+                    print(f'[Episode {dataset.num_episodes}] save finish')
                     recorded_episodes += 1
                     kb_state.set_event('recorded', False)
                     if listener:
@@ -277,10 +248,6 @@ def record(
                     else:
                         input('⌨   Press Enter to record at the next episode >>>>> ')
                         kb_state.set_event('recorded', True)
-
-            if async_episode_saver is not None:
-                print('Waiting for pending async episode saves, all_pending={}'.format(async_episode_saver._queue.qsize()))
-                async_episode_saver.close()
     finally:
         print('\n********** Episode Record Loop Exit **********')
 
@@ -315,18 +282,10 @@ def main():
                        action='store_true', # specify --resume if resume needs to be True
                        default=False,
                        help='Whether contitue recording on existing dataset (default: False)')
-    arg_parser.add_argument('-a', '--async-save',
+    arg_parser.add_argument('-s', '--streaming-encoding',
                        action='store_true',
                        default=False,
-                       help='Enable async background saving (default: False)')
-    arg_parser.add_argument('--async-save-max-pending',
-                       type=int,
-                       default=5,
-                       help='Maximum unfinished async episode saves kept in memory (default: 5)')
-    arg_parser.add_argument('--async-save-max-image-tasks',
-                       type=int,
-                       default=8192,
-                       help='Maximum unfinished image write tasks kept in memory; 0 disables this limit (default: 8192)')
+                       help='Streaming encoding or not')
     args, unknown = arg_parser.parse_known_args()
     sys.argv = [sys.argv[0]] + unknown
     register_third_party_plugins()
@@ -334,12 +293,9 @@ def main():
     if args.r:
         cfg.resume = True
     cfg.play_sounds = False
-    record(
-        cfg,
-        async_save=args.async_save,
-        async_save_max_pending=args.async_save_max_pending,
-        async_save_max_image_tasks=args.async_save_max_image_tasks,
-    )
+    if args.streaming_encoding and not cfg.dataset.streaming_encoding:
+        cfg.dataset.streaming_encoding = True
+    record(cfg)
 
 
 if __name__ == '__main__':
