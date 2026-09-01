@@ -48,9 +48,6 @@ class KeyboardState:
             if k != 'key.esc':
                 self.key_dict[k] = False
 
-OnPressCallback = Callable[[str, KeyboardState], None]
-OnReleaseCallback = Callable[[str, KeyboardState], None]
-
 
 def _register_keyboard_listener(on_press_key: Optional[Callable[[str], None]] = None,
                                on_release_key: Optional[Callable[[str], None]] = None):
@@ -102,19 +99,19 @@ def _register_keyboard_listener(on_press_key: Optional[Callable[[str], None]] = 
 
 def register_keyboard_controls(
     kb_state: KeyboardState = None,
-    on_press: Optional[OnPressCallback] = None,
-    on_release: Optional[OnReleaseCallback] = None,
+    on_press: Optional[Callable[[str], None]] = None,
+    on_release: Optional[Callable[[str], None]] = None,
     help_text: str = 'Keyboard Control'
 ) -> tuple[Optional[object], KeyboardState]:
     """Create a ``KeyboardState``, attach a listener, and return them.
 
     Args:
         kb_state: Initial keyboard state
-        on_press: Optional callback ``(key_name, state) -> None`` invoked on
+        on_press: Optional callback ``(key_name) -> None`` invoked on
             every key press *after* the default handler and *before* the
             internal key_dict is updated.  Use this for script-specific
             events/actions (e.g. toggle pause, mark save).
-        on_release: Optional callback ``(key_name, state) -> None`` invoked on
+        on_release: Optional callback ``(key_name) -> None`` invoked on
             every key release *after* the default handler and *before* the
             internal key_dict is updated.
         help_text: print after initial
