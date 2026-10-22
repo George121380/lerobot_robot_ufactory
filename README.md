@@ -1,8 +1,8 @@
 # UFACTORY LeRobot
 
-> **Lab documentation draft:** [Read the online English guide](https://george121380.github.io/lerobot_robot_ufactory/) · [Documentation source and editing instructions](docs/README.md)
+> **Lab documentation draft:** [Read the English GELLO lab guide](https://george121380.github.io/lerobot_robot_ufactory/) · [Documentation source and editing instructions](docs/README.md)
 >
-> This fork adds a lab-oriented operating guide. Robot-control code is unchanged from upstream commit `5fe6fb1`.
+> This fork adds a GELLO-focused lab operating guide. Robot-control code is unchanged from upstream commit `5fe6fb1`.
 
 > [中文版本](README_ZH.md)
 

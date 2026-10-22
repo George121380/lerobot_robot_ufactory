@@ -1,6 +1,8 @@
 # xArm Lab Guide
 
-English documentation draft for lab members using UFACTORY xArm with LeRobot.
+English GELLO operating-guide draft for lab members using UFACTORY xArm with LeRobot.
+
+The main workflow uses GELLO joint-space demonstrations. xArm5/6/7 configuration links remain available until the lab model is confirmed; other teleoperators are optional reference material.
 
 - **Online guide:** https://george121380.github.io/lerobot_robot_ufactory/
 - **Content:** `index.html`
@@ -35,7 +37,7 @@ Source links use the reviewed upstream commit. After updating the robot code, re
 Before calling this a station-validated guide, add:
 
 1. The tested hardware, firmware, OS, CUDA, Python and peripheral SDK versions.
-2. The station's verified reference-pose and coordinate-mapping procedure.
+2. The station's GELLO motor IDs/signs, torque IDs, reference-pose photos, and verified gripper travel.
 3. Camera-mount references and image preprocessing conventions.
 4. Dataset naming, storage and experiment-log conventions.
 5. Results of teleoperation, a short recording, dataset review, training and supervised rollout, with dates and code revisions.
@@ -50,4 +52,4 @@ Keep credentials and non-public station details out of this public documentation
 - Verify every command and source-specific claim against the pinned software version.
 - Robot commands in the guide are instructions for a configured physical workstation; do not execute them merely to validate a documentation edit.
 
-The first draft was checked against source, and the `continuous_rotvec` issue was reproduced in isolation. End-to-end installation, training and physical robot operation remain unverified.
+Draft 0.2 centers GELLO installation, startup alignment, cameras, and joint-action semantics. The Cartesian `continuous_rotvec` issue was reproduced in isolation and is retained only as an optional reference; it does not affect the default GELLO joint-action path. End-to-end installation, training and physical robot operation remain unverified.
