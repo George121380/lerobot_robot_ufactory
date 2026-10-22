@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A practical lab guide to UFACTORY xArm and LeRobot: station setup, teleoperation, demonstration recording, training, and policy rollout.">
+  <meta name="color-scheme" content="light dark">
+  <title>xArm Lab Guide · UFACTORY × LeRobot</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="#overview" aria-label="xArm Lab Guide home"><span class="brand-symbol" aria-hidden="true">x</span><span>xArm <strong>Lab Guide</strong></span></a>
+    <span class="draft-label">DRAFT 0.1</span>
+    <div class="header-actions">
+      <a class="repo-link" href="https://github.com/George121380/lerobot_robot_ufactory">GitHub <span aria-hidden="true">↗</span></a>
+      <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch color theme">Theme</button>
+      <button class="icon-button menu-button" id="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+      <label class="search-box" for="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search this guide" aria-label="Search this guide" autocomplete="off"><kbd>/</kbd></label>
+      <div id="search-results" aria-live="polite" hidden></div>
+      <nav id="navigation">
+        <p class="nav-group">START HERE</p>
+        <a href="#overview" class="active">Overview</a>
+        <a href="#workflow">Your first session</a>
+        <p class="nav-group">SET UP A STATION</p>
+        <a href="#hardware">Hardware &amp; prerequisites</a>
+        <a href="#installation">Install the software</a>
+        <a href="#configuration">Configure your station</a>
+        <a href="#calibration">Check frames &amp; calibration</a>
+        <p class="nav-group">RUN AN EXPERIMENT</p>
+        <a href="#teleoperation">01 · Teleoperate</a>
+        <a href="#recording">02 · Record demonstrations</a>
+        <a href="#inspection">03 · Inspect the dataset</a>
+        <a href="#training">04 · Train a policy</a>
+        <a href="#rollout">05 · Run a policy</a>
+        <p class="nav-group">REFERENCE</p>
+        <a href="#data-contract">State &amp; action conventions</a>
+        <a href="#troubleshooting">Troubleshooting</a>
+        <a href="#known-limitations">Known implementation limits</a>
+        <a href="#code-map">Code map</a>
+        <a href="#maintaining">Maintain this guide</a>
+      </nav>
+      <div class="sidebar-footer"><span class="status-dot"></span> Source-based draft<br><span>LeRobot 0.6.1 · Python 3.12</span></div>
+    </aside>
+    <main id="main">
+      <section id="overview" class="doc-section hero" data-title="Overview">
+        <div class="eyebrow">UFACTORY × LEROBOT / LAB DOCUMENTATION</div>
+        <h1>From robot setup<br>to a first policy rollout.</h1>
+        <p class="lead">A shared operating guide for collecting demonstrations and running imitation-learning experiments with UFACTORY xArm robots.</p>
+        <div class="hero-actions"><a class="button primary" href="#workflow">Start with the workflow <span aria-hidden="true">→</span></a><a class="button secondary" href="#configuration">Configure a station</a></div>
+        <div class="version-strip"><span>Draft <strong>0.1</strong></span><span>Updated <strong>21 Oct 2026</strong></span><span>Upstream <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/commit/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82"><code>5fe6fb1</code></a></span></div>
+        <div class="notice"><strong>Before using a physical station</strong><p>The commands and behavior below follow the source snapshot linked above. The lab's exact robot, camera mounts, home poses, and working SDK image still need a station owner to verify them. This draft has not been validated on lab hardware.</p></div>
+        <h2>What this repository provides</h2>
+        <p>The UFACTORY package connects robot drivers, teleoperators, and cameras to LeRobot. It records demonstrations in LeRobot format and loads trained policies for real-time robot control. Policy architectures and training come from the pinned LeRobot dependency.</p>
+        <div class="pipeline" role="img" aria-label="Teleoperator and robot cameras feed demonstration recording. The dataset is used by LeRobot training, and the resulting policy drives the robot in a feedback loop.">
+          <div><small>INPUTS</small><strong>Teleop + cameras</strong><span>Human demonstrations</span></div><b aria-hidden="true">→</b>
+          <div><small>DATA</small><strong>LeRobotDataset</strong><span>State, action, images, task</span></div><b aria-hidden="true">→</b>
+          <div><small>LEARNING</small><strong>ACT / Diffusion</strong><span>LeRobot training</span></div><b aria-hidden="true">→</b>
+          <div><small>DEPLOYMENT</small><strong>Robot rollout</strong><span>Observe, predict, act</span></div>
+        </div>
+        <h3>Choose the path that matches your hardware</h3>
+        <div class="table-scroll"><table><thead><tr><th>Input device</th><th>Control representation</th><th>Starting configuration</th></tr></thead><tbody>
+          <tr><td><strong>GELLO</strong><span>Dynamixel leader arm</span></td><td>Joint targets + gripper</td><td><a href="https://github.com/George121380/lerobot_robot_ufactory/blob/main/config/gello/xarm6_gello_record_config.yaml" data-repo="config/gello/xarm6_gello_record_config.yaml">xArm6 + GELLO</a><span>xArm5 / xArm7 examples also exist</span></td></tr>
+          <tr><td><strong>Pika</strong><span>Pika Sense + Vive</span></td><td>Cartesian pose + gripper</td><td><a href="https://github.com/George121380/lerobot_robot_ufactory/blob/main/config/pika/xarm7_pika_record_config.yaml" data-repo="config/pika/xarm7_pika_record_config.yaml">xArm7 + Pika</a></td></tr>
+          <tr><td><strong>UMI</strong><span>XVisio SLAM or Vive tracking</span></td><td>Cartesian pose + gripper</td><td><a href="https://github.com/George121380/lerobot_robot_ufactory/blob/main/config/umi/xarm6_umi_record_config.yaml" data-repo="config/umi/xarm6_umi_record_config.yaml">xArm6 + UMI</a><span>Single-arm, dual-arm, and robot-free recording examples</span></td></tr>
+          <tr><td><strong>SpaceMouse</strong><span>Current implementation: XY translation</span></td><td>Position increments</td><td><a href="https://github.com/George121380/lerobot_robot_ufactory/blob/main/config/spacemouse/xarm7_spacemouse_record_config.yaml" data-repo="config/spacemouse/xarm7_spacemouse_record_config.yaml">xArm7 pushing example</a><span>Z and rotation control are not enabled</span></td></tr>
+        </tbody></table></div>
+        <p class="caption">The walkthrough uses xArm6 + UMI as a concrete example. Select the actual station's configuration before following it. <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/pyproject.toml#L24" data-source="pyproject.toml#L24">Dependency reference</a></p>
+      </section>
+
+      <section id="workflow" class="doc-section" data-title="Your first session">
+        <div class="section-kicker">START HERE</div><h2>Your first session</h2>
+        <p>Start with a short, observable task and a small dataset. Check each stage before increasing episode count, speed, or the number of arms.</p>
+        <ol class="steps">
+          <li><a href="#hardware">Identify the station.</a><p>Confirm the robot model, gripper, input device, cameras, controller address, and the station's stop procedure.</p></li>
+          <li><a href="#configuration">Make a local configuration.</a><p>Replace device identifiers, review home poses and coordinate transforms, and choose a new dataset location.</p></li>
+          <li><a href="#teleoperation">Test teleoperation.</a><p>Check each motion axis and the gripper before trying the task. This command does not test the cameras.</p></li>
+          <li><a href="#recording">Record a few demonstrations.</a><p>Save intentionally; discard failed attempts while recording. Inspect the images and state/action traces.</p></li>
+          <li><a href="#training">Run a small training check.</a><p>Verify data loading and checkpoint creation. A successful training process does not establish policy quality.</p></li>
+          <li><a href="#rollout">Evaluate under supervision.</a><p>Use the same observation schema and camera setup. Record outcomes against a task-specific success criterion.</p></li>
+        </ol>
+        <div class="notice warning"><strong>Startup can move the robot</strong><p><code>connect()</code> calls <code>configure()</code>, which can enable motion, open the gripper, and move to the configured start pose. A paused keyboard loop and <code>no_action: true</code> do not suppress these initialization movements. Check the workspace before launching any command that connects a real robot.</p><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L194" data-source="src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L194">Read the connection and initialization code →</a></div>
+      </section>
+
+      <section id="hardware" class="doc-section" data-title="Hardware and prerequisites">
+        <div class="section-kicker">SET UP A STATION</div><h2>Hardware &amp; prerequisites</h2>
+        <div class="two-column"><div><h3>Station hardware</h3><ul><li>xArm5, xArm6, or xArm7 and its controller.</li><li>The gripper selected by <code>gripper_type</code>.</li><li>One supported teleoperation device.</li><li>Stable camera mounts and the configured cameras.</li><li>A host with controller network access and the required USB/serial connections.</li></ul></div><div><h3>Software baseline</h3><ul><li>Python <strong>3.12</strong> or newer; use 3.12 for the initial environment.</li><li><code>lerobot==0.6.1</code>, as pinned by this repository.</li><li>Ubuntu 22.04 / 24.04 are listed in the upstream README.</li><li>A compatible CUDA/PyTorch setup for GPU training.</li><li>Device-specific SDKs and Linux permissions.</li></ul></div></div>
+        <div class="notice"><strong>UMI has an additional platform constraint</strong><p>The bundled XVLib libraries are Linux x86-64 binaries. Upstream's XVSDK installation instructions name an Ubuntu Focal package, while its general requirements list newer Ubuntu versions. Confirm a working SDK/OS combination before adopting a station image; macOS or ARM compatibility is not established by this repository.</p></div>
+        <h3>Record these details for every shared station</h3>
+        <p>Keep a station record with the arm model and firmware, gripper, controller address, camera names and mounting photos, teleoperator IDs, SDK versions, reference poses, and responsible maintainer. Store non-public station details in the lab's normal private location. The public guide contains no lab-specific network settings.</p>
+        <p class="source">Sources: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/README.md#L43" data-source="README.md#L43">upstream environment requirements</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/pyproject.toml#L11" data-source="pyproject.toml#L11">Python and package constraints</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/uf_robot_config.py" data-source="src/lerobot_robot_ufactory/robots/uf_robot/uf_robot_config.py">robot configuration fields</a>.</p>
+      </section>
+
+      <section id="installation" class="doc-section" data-title="Install the software">
+        <div class="section-kicker">SET UP A STATION</div><h2>Install the software</h2>
+        <p>Use a dedicated environment on the robot workstation. The commands below install the fork and its Python dependencies; peripheral SDK setup is a separate step.</p>
+        <pre><code>git clone https://github.com/George121380/lerobot_robot_ufactory.git
+cd lerobot_robot_ufactory
+
+conda create -n uf_lerobot python=3.12 -y
+conda activate uf_lerobot
+python -m pip install -e .
+python -m pip check</code></pre>
+        <h3>Install the selected peripheral</h3>
+        <div class="table-scroll"><table><thead><tr><th>Device</th><th>Additional setup</th></tr></thead><tbody>
+          <tr><td>GELLO</td><td><code>python -m pip install -e ".[gello]"</code>. Configure serial permissions and verify joint IDs, signs, and the reference posture.</td></tr>
+          <tr><td>SpaceMouse</td><td><code>python -m pip install -e ".[spacemouse]"</code>. Confirm the spnav backend and device permissions on the workstation.</td></tr>
+          <tr><td>Pika</td><td>Follow the upstream Pika instructions for libsurvive and <code>agx-pypika</code>, then configure Vive tracking and device permissions.</td></tr>
+          <tr><td>UMI</td><td>Install the station-compatible XVSDK. Follow upstream's tracking dependencies and udev instructions; use the SDK/OS combination verified for the station.</td></tr>
+          <tr><td>RealSense</td><td>Install the camera dependencies required by LeRobot on the workstation and verify camera enumeration before recording.</td></tr>
+        </tbody></table></div>
+        <p>The udev files live in the repository's <code>rules/</code> directory. Run path-dependent setup commands from the repository root. Some upstream English examples refer to <code>src/rules/</code>; that directory does not exist in this snapshot.</p>
+        <pre><code>python -c "import importlib.metadata as m; print('LeRobot:', m.version('lerobot')); print('UFACTORY:', m.version('lerobot_robot_ufactory'))"
+uf-camera-view -l</code></pre>
+        <p class="expected"><strong>Expected:</strong> LeRobot reports 0.6.1, the UFACTORY package reports 0.2.0, and the camera viewer can enumerate the video devices it supports. Enumeration alone does not verify image quality or synchronization.</p>
+        <p class="source">Reference: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/README.md#L50" data-source="README.md#L50">upstream installation instructions</a>. This guide does not install SDKs or change workstation permissions automatically.</p>
+      </section>
+
+      <section id="configuration" class="doc-section" data-title="Configure your station">
+        <div class="section-kicker">SET UP A STATION</div><h2>Configure your station</h2>
+        <p>Copy the closest example. Keep the upstream examples intact so it is easy to compare local changes after an update.</p>
+        <pre><code>mkdir -p config/local
+cp config/umi/xarm6_umi_record_config.yaml config/local/lab_xarm6_umi.yaml
+export LAB_CONFIG="$PWD/config/local/lab_xarm6_umi.yaml"</code></pre>
+        <p><code>config/local/</code> is ignored by Git in this fork. Edit <code>$LAB_CONFIG</code> before launching a robot command. If the station uses a different arm or teleoperator, copy the matching example instead.</p>
+        <div class="table-scroll"><table><thead><tr><th>Configuration field</th><th>What to set and verify</th></tr></thead><tbody>
+          <tr><td><code>robot.type</code>, <code>robot_dof</code></td><td>Select the physical or Mock implementation and the real arm's 5/6/7 degrees of freedom. A real robot connection checks the DOF.</td></tr>
+          <tr><td><code>robot_ip</code>, <code>gripper_type</code></td><td>Use the station's controller and actual gripper. Check the enum in <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L34" data-source="src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L34">UFRobot</a>.</td></tr>
+          <tr><td><code>control_space</code></td><td><code>joint</code> for the GELLO examples; <code>cartesian</code> for the Pika/UMI examples. Keep it consistent through collection, training, and rollout.</td></tr>
+          <tr><td><code>start_joints</code>, <code>start_tcp_pose</code></td><td>Use station-reviewed start poses. Joint angles and TCP RPY angles in these configuration fields are in degrees.</td></tr>
+          <tr><td><code>max_joint_velocity</code>, <code>max_linear_velocity</code></td><td>Review limits for the task and hardware. These fields are expressed in degrees/s and mm/s respectively; initialization has separate motion calls.</td></tr>
+          <tr><td><code>robot.cameras</code></td><td>Replace serial numbers or device paths. Verify each camera name, resolution, FPS, pixel format, and mount. Some examples, including xArm6 GELLO, do not configure cameras.</td></tr>
+          <tr><td><code>teleop</code></td><td>Set the device ID or serial port, tracking mode, gripper use, and frame mapping. GELLO also needs correct joint IDs and signs.</td></tr>
+          <tr><td><code>dataset.root</code>, <code>repo_id</code></td><td>Choose a new writable local dataset directory and a stable <code>namespace/dataset_name</code>. Avoid names beginning with <code>eval_</code> for collection.</td></tr>
+          <tr><td><code>single_task</code>, <code>fps</code></td><td>Write an unambiguous task description. Choose a rate the entire camera/robot/write loop can sustain.</td></tr>
+          <tr><td><code>num_episodes</code>, <code>episode_time_s</code></td><td>Use a small collection for the first validation; episode time is a maximum recording duration.</td></tr>
+          <tr><td><code>push_to_hub</code></td><td>Keep <code>false</code> for a local collection. Upload only through the lab's established dataset-sharing process.</td></tr>
+        </tbody></table></div>
+        <p>Relative paths are interpreted from the working directory. Prefer absolute dataset paths and keep all workflow commands in the repository root. Use the dataset ID and root reported by the recorder for later training and visualization.</p>
+        <p class="source">Reference: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/config/umi/xarm6_umi_record_config.yaml" data-source="config/umi/xarm6_umi_record_config.yaml">xArm6 + UMI example</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/uf_robot_config.py" data-source="src/lerobot_robot_ufactory/robots/uf_robot/uf_robot_config.py">robot configuration schema</a>.</p>
+      </section>
+
+      <section id="calibration" class="doc-section" data-title="Frames and calibration">
+        <div class="section-kicker">SET UP A STATION</div><h2>Check frames &amp; calibration</h2>
+        <p>Three distinct checks matter: tracking calibration, teleoperator-to-robot mapping, and the camera arrangement used for learning. The presence of a <code>calibrate()</code> method does not mean all three happen automatically; several implementations are no-ops.</p>
+        <h3>GELLO reference posture</h3><p>The constructor reads the leader joints and derives offsets relative to <code>start_joints</code> and <code>joint_signs</code>. Put the leader in the intended reference posture before initialization and verify each joint mapping with the station owner.</p>
+        <h3>Pika and UMI frame mapping</h3><p><code>tracker_to_robot_eef</code> and <code>robot_base_pose</code> establish the mapping. Pika/UMI then use movement relative to the initial tracker pose to produce an <em>absolute</em> target in the robot frame. Check small translations along each axis and small rotations before attempting a task.</p>
+        <h3>Vive and SLAM</h3><p>For Vive-based setups, follow the upstream tracking calibration procedure after changing the base-station layout. <code>uf-vive-calibrate</code> forces calibration and deletes the existing <code>~/.config/libsurvive/config.json</code> before starting; preserve the station's known-good calibration before using it. UMI SLAM mode waits for sufficient confidence at startup and holds the last action on low-confidence readings.</p>
+        <h3>Camera consistency</h3><p>Keep camera mounting, field of view, image names, and preprocessing consistent between collection and deployment. Moving cameras changes the policy's observation distribution. This package does not provide Raiden's automated hand-eye calibration workflow.</p>
+        <p class="source">References: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/teleoperators/gello_teleop/gello_teleop.py#L33" data-source="src/lerobot_robot_ufactory/teleoperators/gello_teleop/gello_teleop.py#L33">GELLO offsets</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/teleoperators/umi_teleop/umi_teleop.py" data-source="src/lerobot_robot_ufactory/teleoperators/umi_teleop/umi_teleop.py">UMI mapping</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/vive_calibrate.py" data-source="src/lerobot_robot_ufactory/scripts/vive_calibrate.py">Vive calibration script</a>.</p>
+      </section>
+
+      <section id="teleoperation" class="doc-section" data-title="Teleoperate">
+        <div class="section-kicker">EXPERIMENT / 01</div><h2>Teleoperate before recording</h2>
+        <p>After checking startup motion and the configured poses, test the selected input device with the robot. The example below is for the UMI walkthrough.</p>
+        <pre><code>uf-robot-teleop --config_path "$LAB_CONFIG" --fps 30</code></pre>
+        <div class="table-scroll"><table><thead><tr><th>Key</th><th>Teleoperation behavior</th></tr></thead><tbody><tr><td><kbd>Space</kbd></td><td>Start or pause teleoperation.</td></tr><tr><td><kbd>←</kbd></td><td>Request reset and pause. Resuming can call <code>robot.configure()</code> and move to the start pose.</td></tr><tr><td><kbd>Enter</kbd></td><td>Show the current keyboard help.</td></tr><tr><td><kbd>Esc</kbd></td><td>Exit the loop and disconnect.</td></tr></tbody></table></div>
+        <p class="expected"><strong>Check:</strong> input motion maps to the intended robot axis, the reference pose is correct, and the gripper direction is correct. Resolve jumps, unexpected motion, or error codes before collecting demonstrations.</p>
+        <p>The teleoperation entry point removes cameras from the configuration. Check camera feeds separately with <code>uf-camera-view</code>, then verify the actual recording output. Keep an interactive terminal focused when using the terminal keyboard fallback.</p>
+        <div class="notice warning"><strong>A software pause is not a hardware emergency stop</strong><p>The keyboard loop can stop issuing new commands, but an already issued motion can still be in progress. Know the station's physical emergency-stop procedure before operating the robot.</p></div>
+        <p class="source">Reference: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/uf_robot_teleop.py" data-source="src/lerobot_robot_ufactory/scripts/uf_robot_teleop.py">teleoperation entry point</a>.</p>
+      </section>
+
+      <section id="recording" class="doc-section" data-title="Record demonstrations">
+        <div class="section-kicker">EXPERIMENT / 02</div><h2>Record demonstrations</h2>
+        <p>Choose a fresh dataset root for a new collection. The following is a short validation session, not a recommended training-set size.</p>
+        <pre><code>uf-lerobot-record \
+  --config_path "$LAB_CONFIG" \
+  --dataset.num_episodes=3 \
+  --dataset.episode_time_s=30 \
+  --dataset.push_to_hub=false</code></pre>
+        <div class="table-scroll"><table><thead><tr><th>Key</th><th>Recording behavior</th></tr></thead><tbody><tr><td><kbd>Space</kbd></td><td>Start an episode. For UFACTORY base teleoperators, the robot is configured and the teleop reference is re-established.</td></tr><tr><td><kbd>→</kbd></td><td>End and save the current episode. Reaching the time limit also leads to saving.</td></tr><tr><td><kbd>←</kbd></td><td>Discard the current episode buffer and prepare to re-record.</td></tr><tr><td><kbd>Esc</kbd></td><td>Exit. Save an episode explicitly before exiting if you want to retain it.</td></tr><tr><td><kbd>Enter</kbd></td><td>Show controls for the current state.</td></tr></tbody></table></div>
+        <p>Reset the objects between episodes and record the intended task consistently. <code>reset_time_s</code> appears in examples, but the custom recording loop does not use it to enforce an automatic reset interval.</p>
+        <h3>Continue an existing collection</h3>
+        <pre><code>uf-lerobot-record --config_path "$LAB_CONFIG" --resume true</code></pre>
+        <p>Use the same dataset root, ID, FPS, feature names, and camera setup. The resume path checks compatibility. Do not treat a changed camera mount or action convention as the same dataset merely because the tensor shapes match.</p>
+        <h3>What gets saved</h3><p>Each frame contains the processed robot observation, teleoperator action, and task. Numeric observations/actions and episode metadata are managed by LeRobot; camera streams are stored according to its dataset/video configuration. <code>streaming_encoding</code> can reduce the work left at episode save time, but it does not establish hardware synchronization.</p>
+        <p class="source">References: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/uf_lerobot_record.py" data-source="src/lerobot_robot_ufactory/scripts/uf_lerobot_record.py">recording lifecycle</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/_uf_lerobot/record_loop.py#L80" data-source="src/lerobot_robot_ufactory/scripts/_uf_lerobot/record_loop.py#L80">per-frame data flow</a>.</p>
+      </section>
+
+      <section id="inspection" class="doc-section" data-title="Inspect the dataset">
+        <div class="section-kicker">EXPERIMENT / 03</div><h2>Inspect before scaling up</h2>
+        <p>Set these values to the dataset actually saved by the recorder. They are examples to replace, not paths that already exist on the workstation.</p>
+        <pre><code>export DATASET_ROOT="/absolute/path/to/your/recorded_dataset"
+export DATASET_ID="your_namespace/your_dataset"
+
+lerobot-dataset-viz \
+  --root="$DATASET_ROOT" \
+  --repo-id "$DATASET_ID" \
+  --episode-index 0 \
+  --display-compressed-images true</code></pre>
+        <ul class="check-list"><li>Every expected camera is present, correctly oriented, and updating.</li><li>Objects and the gripper stay in view throughout the task.</li><li>State/action curves have plausible units and no unexplained discontinuities.</li><li>Gripper open/close values agree with the images.</li><li>Episode starts, endings, and the task description are correct.</li><li>The record loop is not repeatedly reporting a rate below the requested FPS.</li></ul>
+        <p>Keep a collection log with the code revision, configuration, environment versions, camera-mount reference, operator, task, and rejected episodes. When editing or merging datasets, write a new derived dataset so the original collection remains available.</p>
+        <p class="source">Reference: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/README.md#L240" data-source="README.md#L240">upstream dataset tools</a>. Use <code>lerobot-edit-dataset --help</code> for the installed version's operation arguments.</p>
+      </section>
+
+      <section id="training" class="doc-section" data-title="Train a policy">
+        <div class="section-kicker">EXPERIMENT / 04</div><h2>Train a first policy</h2>
+        <p>Training is provided by LeRobot. This ACT example is a short pipeline check using the dataset selected above. The step count and batch size are starting values for debugging, not a claim about task performance.</p>
+        <pre><code>export RUN_DIR="$PWD/outputs/act_smoke_$(date +%Y%m%d_%H%M%S)"
+
+lerobot-train \
+  --dataset.root="$DATASET_ROOT" \
+  --dataset.repo_id="$DATASET_ID" \
+  --policy.type=act \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --output_dir="$RUN_DIR" \
+  --job_name=act_smoke \
+  --steps=2000 \
+  --batch_size=8 \
+  --save_freq=1000 \
+  --wandb.enable=false</code></pre>
+        <p class="expected"><strong>Expected:</strong> the dataset loads with the intended image and state features, the training loss is finite, and a checkpoint is saved. Inspect the generated training configuration and the actual selected device.</p>
+        <p>Keep train/validation splits at the episode level. For a task evaluation, also hold out relevant objects, arrangements, or conditions rather than relying on neighboring video frames as independent test samples. Choose the final training schedule after checking data quality and task performance.</p>
+        <p>To explore Diffusion Policy or another supported model, follow the pinned LeRobot version's configuration. Robot-side state/action meanings, FPS, and preprocessing must still match the demonstrations.</p>
+        <p class="source">References: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/README_ZH.md#L183" data-source="README_ZH.md#L183">upstream ACT training example</a> · <a href="https://pypi.org/project/lerobot/0.6.1/">LeRobot 0.6.1</a>.</p>
+      </section>
+
+      <section id="rollout" class="doc-section" data-title="Run a policy">
+        <div class="section-kicker">EXPERIMENT / 05</div><h2>Run the trained policy</h2>
+        <p>Use a reviewed checkpoint and the corresponding dataset metadata/statistics. Confirm camera names, image preprocessing, action representation, start pose, and dataset FPS before connecting the robot.</p>
+        <pre><code>export POLICY_PATH="$RUN_DIR/checkpoints/last/pretrained_model"
+
+uf-lerobot-eval \
+  --config_path "$LAB_CONFIG" \
+  --dataset.root="$DATASET_ROOT" \
+  --dataset.repo_id="$DATASET_ID" \
+  --policy.path "$POLICY_PATH"</code></pre>
+        <div class="table-scroll"><table><thead><tr><th>Key</th><th>Rollout behavior</th></tr></thead><tbody><tr><td><kbd>Space</kbd></td><td>Start, pause, or resume policy execution.</td></tr><tr><td><kbd>←</kbd></td><td>Stop the current episode and request reset. Starting again reconfigures the robot and resets policy/processor state.</td></tr><tr><td><kbd>Esc</kbd></td><td>Exit and disconnect.</td></tr><tr><td><kbd>Enter</kbd></td><td>Show the current controls.</td></tr></tbody></table></div>
+        <div class="notice warning"><strong>Keep the first rollout on the default absolute-action path</strong><p>Do not add <code>--relative</code> to an absolute-action checkpoint. It changes observation/action semantics, and the current relative-pose helper has a reproduced rotation-equivalence bug. See <a href="#known-limitations">known implementation limits</a>.</p></div>
+        <p><code>uf-lerobot-eval</code> is an interactive deployment loop. It does not provide automated success-rate measurement, and <code>n_episodes</code> is not consumed to bound the loop. Log trials separately: checkpoint, initial condition, success/failure, intervention, and failure mode. Define task success before comparing policies.</p>
+        <h3>End the session</h3><p>Exit the running process and verify that the arm has stopped. Follow the station's normal parking and power-down procedure. Save the session's configuration and outcome log with the dataset or checkpoint record.</p>
+        <p class="source">Reference: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/uf_lerobot_eval.py" data-source="src/lerobot_robot_ufactory/scripts/uf_lerobot_eval.py">policy rollout implementation</a>.</p>
+      </section>
+
+      <section id="data-contract" class="doc-section" data-title="State and action conventions">
+        <div class="section-kicker">REFERENCE</div><h2>State &amp; action conventions</h2>
+        <p>A typical single-arm Cartesian configuration has six pose values and one gripper value, plus camera images in the observation. Optional joint-velocity features and multi-arm configurations change the schema.</p>
+        <div class="table-scroll"><table><thead><tr><th>Field</th><th>Meaning</th><th>Unit or convention</th></tr></thead><tbody>
+          <tr><td><code>J1.pos … Jn.pos</code></td><td>Joint state / target</td><td>Radians internally</td></tr>
+          <tr><td><code>pose.x / y / z</code></td><td>End-effector position / target</td><td>Millimeters</td></tr>
+          <tr><td><code>pose.rx / ry / rz</code></td><td>Rotation vector (axis × angle)</td><td>Radians; not Euler RPY</td></tr>
+          <tr><td><code>gripper.pos</code></td><td>Normalized gripper position</td><td>Usually 0 = open, 1 = closed; mapped to device units</td></tr>
+          <tr><td><code>start_joints</code></td><td>Configuration start posture</td><td>Degrees, converted internally</td></tr>
+          <tr><td><code>start_tcp_pose</code></td><td>Configuration start pose</td><td>XYZ in mm, then roll/pitch/yaw in degrees</td></tr>
+          <tr><td><code>left.* / right.*</code></td><td>Multi-arm fields</td><td>Each child arm's own frame; the prefix is not a shared world-frame transform</td></tr>
+        </tbody></table></div>
+        <p>Pika and UMI use relative <em>input-device movement</em> to generate absolute robot targets. That is distinct from training a policy to predict relative actions. In the record loop, the saved action is the teleoperator-processor output; if a custom robot-action processor clips or transforms it, the saved label can differ from the executed command.</p>
+        <p class="source">References: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L304" data-source="src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L304">observation/action implementation</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/multiple_uf_robot.py" data-source="src/lerobot_robot_ufactory/robots/uf_robot/multiple_uf_robot.py">multiple-arm wrapper</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/_uf_lerobot/record_loop.py#L100" data-source="src/lerobot_robot_ufactory/scripts/_uf_lerobot/record_loop.py#L100">action-processing boundary</a>.</p>
+      </section>
+
+      <section id="troubleshooting" class="doc-section" data-title="Troubleshooting">
+        <div class="section-kicker">REFERENCE</div><h2>Troubleshooting</h2>
+        <p>Start with the smallest failing component. Preserve the error message and station configuration before changing several settings at once.</p>
+        <div class="table-scroll"><table><thead><tr><th>Symptom</th><th>First checks</th></tr></thead><tbody>
+          <tr><td>Robot connection or DOF error</td><td>Controller address, host network, controller status, and configured 5/6/7 DOF.</td></tr>
+          <tr><td><code>RT Report … NOT READY</code></td><td>The Cartesian observation path uses controller port 30000. Check reachability, firmware/report compatibility, and any preceding thread exception.</td></tr>
+          <tr><td>Camera missing or frozen</td><td>USB/device permissions, serial/path, requested mode, competing applications, and fresh frames. A cached last frame can conceal camera-read failures.</td></tr>
+          <tr><td>UMI cannot load a shared library</td><td>Linux x86-64 platform, the installed XVSDK, native dependencies, and the station's tested OS image.</td></tr>
+          <tr><td>UMI SLAM never becomes ready</td><td>Tracking visibility, scene texture/lighting, device connection, and confidence output. Resolve tracking before robot motion.</td></tr>
+          <tr><td>Wrong direction or large first movement</td><td>Start posture, joint signs/offsets, frame mapping, and the distinction between Euler configuration angles and rotation-vector actions.</td></tr>
+          <tr><td>Recording slower than requested FPS</td><td>Camera rate/resolution, image encoding, disk throughput, and CPU load. Reduce one load source and measure again.</td></tr>
+          <tr><td>Dataset already exists</td><td>Use <code>--resume true</code> only for the same collection, or choose a new root and ID.</td></tr>
+          <tr><td>Keyboard controls do not respond</td><td>Use an interactive terminal and keep it focused for the terminal fallback. Do not launch first rollouts through a detached non-interactive process.</td></tr>
+          <tr><td>Policy input shape or feature mismatch</td><td>Dataset metadata, camera keys, image size, control space, gripper fields, and checkpoint preprocessing.</td></tr>
+        </tbody></table></div>
+        <p class="source">References: <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L480" data-source="src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py#L480">real-time report reader</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/utils/keyboard.py" data-source="src/lerobot_robot_ufactory/utils/keyboard.py">keyboard backends</a> · <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/cameras/umi_camera/camera_umi.py#L87" data-source="src/lerobot_robot_ufactory/cameras/umi_camera/camera_umi.py#L87">UMI camera caching</a>.</p>
+      </section>
+
+      <section id="known-limitations" class="doc-section" data-title="Known implementation limits">
+        <div class="section-kicker">REFERENCE</div><h2>Known implementation limits</h2>
+        <p>These notes apply to upstream <code>5fe6fb1</code>. This documentation change does not modify the robot-control code.</p>
+        <details open><summary>Relative-pose rotation continuity <span class="tag">Reproduced</span></summary><div><p><code>continuous_rotvec()</code> considers both +θ and −θ on the same axis as equivalent. They generally represent different rotations. Calling the original function with <code>new=[0,0,1]</code> and <code>previous=[0,0,-0.9]</code> returns <code>[0,0,-1]</code>, changing the target rotation by 2 radians.</p><p>The helper is used in <code>to_absolute_pose()</code> and the relative rollout path. Resolve this before using that path. Default rollout has <code>relative=False</code>.</p><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/utils/pose_utils.py#L13" data-source="src/lerobot_robot_ufactory/utils/pose_utils.py#L13">Source →</a></div></details>
+        <details><summary>Mock recording is not physical simulation</summary><div><p><code>UFMockRobot</code> takes its state from the active teleoperator and returns actions without physical execution. The <code>state_offset_action</code> delay code is commented out. It does not model dynamics, contact, or robot latency.</p><p><code>UFMockTeleop</code> is a different class: it connects to a real arm for programmatic motion/data generation. Do not infer “no hardware motion” from the word Mock alone.</p><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_mock_robot/uf_mock_robot.py#L100" data-source="src/lerobot_robot_ufactory/robots/uf_mock_robot/uf_mock_robot.py#L100">Mock robot source →</a></div></details>
+        <details><summary>SpaceMouse is a limited demonstration path</summary><div><p>The current output only moves in XY: Z is forced to zero, rotation control is commented out, and gripper output is fixed. The recording loop integrates its position deltas; the generic teleoperation test loop does not contain that conversion. Review this path before using it as a general end-effector controller.</p><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/teleoperators/space_mouse/space_mouse.py#L150" data-source="src/lerobot_robot_ufactory/teleoperators/space_mouse/space_mouse.py#L150">SpaceMouse source →</a></div></details>
+        <details><summary>Smoothing and synchronization are not guaranteed</summary><div><p><code>SMOOTH_THRESHOLD=0</code> disables the rollout smoothing branch by default. Gripper look-ahead application code is commented out. The recorder reads state and cameras sequentially and uses timing sleeps; a configured 60 FPS does not establish synchronized camera/robot measurements or a sustained 60 Hz loop.</p><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/uf_lerobot_eval.py#L160" data-source="src/lerobot_robot_ufactory/scripts/uf_lerobot_eval.py#L160">Rollout settings →</a></div></details>
+        <details><summary>Version and configuration maintenance</summary><div><p>The package requires Python ≥3.12, despite the older ≥3.10 statement in the Chinese README. LeRobot is pinned to 0.6.1, while several peripheral dependencies are not pinned to commits. The custom parser can remove unknown configuration fields, so a typo may not always be rejected. Review the logged effective configuration.</p><p>The reviewed upstream tree contains no test files or CI workflows. Hardware compatibility remains a station-specific validation task.</p><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/configs/parser.py#L47" data-source="src/lerobot_robot_ufactory/configs/parser.py#L47">Parser behavior →</a></div></details>
+      </section>
+
+      <section id="code-map" class="doc-section" data-title="Code map">
+        <div class="section-kicker">REFERENCE</div><h2>Code map</h2>
+        <p>Follow one station configuration through the entry point, per-frame loop, and device implementation.</p>
+        <div class="table-scroll"><table><thead><tr><th>Read this</th><th>To understand</th></tr></thead><tbody>
+          <tr><td><a href="https://github.com/George121380/lerobot_robot_ufactory/blob/main/config/umi/xarm6_umi_record_config.yaml" data-repo="config/umi/xarm6_umi_record_config.yaml">Example YAML</a></td><td>The robot, teleoperator, camera, and dataset selected for an experiment.</td></tr>
+          <tr><td><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/uf_lerobot_record.py" data-source="src/lerobot_robot_ufactory/scripts/uf_lerobot_record.py">uf_lerobot_record.py</a></td><td>Object creation, connection order, keyboard events, and episode saving.</td></tr>
+          <tr><td><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/_uf_lerobot/record_loop.py" data-source="src/lerobot_robot_ufactory/scripts/_uf_lerobot/record_loop.py">record_loop.py</a></td><td>The exact observation/action pair written each frame.</td></tr>
+          <tr><td><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py" data-source="src/lerobot_robot_ufactory/robots/uf_robot/uf_robot.py">uf_robot.py</a></td><td>Feature schemas, SDK calls, gripper mapping, and the real-time report thread.</td></tr>
+          <tr><td><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/teleoperators/umi_teleop/umi_teleop.py" data-source="src/lerobot_robot_ufactory/teleoperators/umi_teleop/umi_teleop.py">umi_teleop.py</a></td><td>Tracking confidence, reference poses, and teleoperator-to-robot mapping.</td></tr>
+          <tr><td><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/scripts/uf_lerobot_eval.py" data-source="src/lerobot_robot_ufactory/scripts/uf_lerobot_eval.py">uf_lerobot_eval.py</a></td><td>Checkpoint loading, pre/postprocessing, and policy execution.</td></tr>
+          <tr><td><a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/blob/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82/src/lerobot_robot_ufactory/utils/pose_utils.py" data-source="src/lerobot_robot_ufactory/utils/pose_utils.py">pose_utils.py</a></td><td>Absolute/relative pose conversion and rotation continuity.</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section id="maintaining" class="doc-section" data-title="Maintain this guide">
+        <div class="section-kicker">FOR MAINTAINERS</div><h2>Make this a living lab guide</h2>
+        <p>Before replacing the draft label with a station-validated status, add the lab's confirmed hardware/software matrix, reference-pose procedure, camera-mount references, dataset location conventions, and the results of a complete collection-to-rollout check. Record the validation date and the relevant code revision.</p>
+        <p>The page is static HTML/CSS/JavaScript in <code>docs/</code>. It has no build step, accounts, analytics, or external script dependencies. GitHub Pages serves this directory from the fork's <code>main</code> branch.</p>
+        <div class="link-list"><a href="https://github.com/George121380/lerobot_robot_ufactory/blob/main/docs/README.md">Editing and local preview instructions <span>↗</span></a><a href="https://github.com/George121380/lerobot_robot_ufactory/edit/main/docs/index.html">Propose an edit to this page <span>↗</span></a></div>
+        <h3>Reference and attribution</h3>
+        <p>The organization of this guide takes inspiration from <a href="https://tri-ml.github.io/raiden/">TRI's Raiden documentation</a>, particularly its <a href="https://tri-ml.github.io/raiden/guide/quickstart/">step-by-step workflow</a> and <a href="https://tri-ml.github.io/raiden/guide/recording/">recording guide</a>. Raiden targets YAM hardware and a different software stack; its commands and capabilities do not transfer to this repository.</p>
+        <p>All xArm behavior described here is grounded in <a href="https://github.com/xArm-Developer/lerobot_robot_ufactory/tree/5fe6fb150bfa71ad3ca8a0b780c89ff8d4033a82">the reviewed UFACTORY source</a> and the pinned LeRobot release. The draft contains original explanatory text and does not reproduce TRI's figures or branding.</p>
+      </section>
+      <footer class="page-footer"><span>xArm Lab Guide · Draft 0.1</span><a href="#overview">Back to top ↑</a><span>Documentation for the George121380 fork</span></footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>
